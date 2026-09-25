@@ -1,0 +1,11 @@
+# Binaries
+agywarp
+bin/
+
+# OS and IDE files
+.DS_Store
+.vscode/
+.idea/
+
+# Private
+private/

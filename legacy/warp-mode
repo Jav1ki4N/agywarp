@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE="$HOME/.local/share/io.github.clash-verge-rev.clash-verge-rev"
+GENERATED="$BASE/clash-verge.yaml"
+PROXY_EXTENSION="$BASE/profiles/pGNGM2apHpq0.yaml"
+RULE_EXTENSION="$BASE/profiles/r4uzTpqME3dW.yaml"
+
+check_config() {
+    grep -q 'name: "WARP-LOCAL"' "$PROXY_EXTENSION"
+    grep -q 'PROCESS-NAME,agy,WARP-LOCAL' "$RULE_EXTENSION"
+    grep -q '^mode: rule$' "$BASE/config.yaml"
+}
+
+runtime_config_loaded() {
+    systemctl is-active --quiet clash-verge-service.service \
+        && grep -q '^mode: rule$' "$GENERATED" 2>/dev/null \
+        && grep -q 'PROCESS-NAME,agy,WARP-LOCAL' "$GENERATED" 2>/dev/null \
+        && grep -q 'name: WARP-LOCAL' "$GENERATED" 2>/dev/null \
+        && ss -lnt 2>/dev/null | grep -q '127\.0\.0\.1:7897'
+}
+
+wait_for_warp() {
+    local attempt status
+    for attempt in {1..15}; do
+        status="$(timeout 5 warp-cli status 2>/dev/null | sed -n 's/^Status update: //p' || true)"
+        if [[ "$status" == "Connected" ]]; then
+            return 0
+        fi
+        printf '[warp-mode] Waiting for WARP (%s/15): %s\n' "$attempt" "${status:-no response}"
+        sleep 2
+    done
+    return 1
+}
+
+verify_us_exit() {
+    local trace
+    trace="$(curl --max-time 15 --silent --show-error \
+        --proxy socks5://127.0.0.1:40000 --insecure \
+        https://1.1.1.1/cdn-cgi/trace)" || return 1
+
+    printf '%s\n' "$trace" | grep -q '^warp=on$' \
+        && printf '%s\n' "$trace" | grep -q '^loc=US$'
+}
+
+ensure_warpproxy_protocol() {
+    local settings
+    settings="$(timeout 5 warp-cli settings 2>/dev/null || true)"
+
+    if ! grep -q 'Mode: WarpProxy on port 40000' <<<"$settings"; then
+        echo "[warp-mode] WARP is not configured as WarpProxy on port 40000." >&2
+        return 1
+    fi
+
+    if grep -q 'WARP tunnel protocol: MASQUE' <<<"$settings"; then
+        return 0
+    fi
+
+    echo "[warp-mode] WarpProxy requires MASQUE; repairing the tunnel protocol..."
+    pkexec /usr/bin/warp-cli --accept-tos tunnel protocol set MASQUE
+
+    settings="$(timeout 5 warp-cli settings 2>/dev/null || true)"
+    grep -q 'WARP tunnel protocol: MASQUE' <<<"$settings"
+}
+
+enable_warp() {
+    echo "[warp-mode] Enabling WARP routing..."
+    if ! check_config; then
+        echo "[warp-mode] Refusing to start: persistent Mihomo WARP configuration is missing." >&2
+        exit 1
+    fi
+
+    if ! ensure_warpproxy_protocol; then
+        echo "[warp-mode] Could not verify WarpProxy/MASQUE configuration; refusing to report ON." >&2
+        exit 1
+    fi
+
+    # Restart Mihomo only when its live configuration is missing or stale.
+    # If a restart is needed, finish it before connecting WARP; otherwise the
+    # TUN interface transition can immediately tear down the new WARP tunnel.
+    if ! runtime_config_loaded; then
+        echo "[warp-mode] Reloading Mihomo before WARP..."
+        sudo systemctl restart clash-verge-service.service
+        sleep 3
+        if ! runtime_config_loaded; then
+            echo "[warp-mode] Mihomo did not load the required rule-mode configuration." >&2
+            exit 1
+        fi
+    fi
+
+    local current_status
+    current_status="$(timeout 5 warp-cli status 2>/dev/null | sed -n 's/^Status update: //p' || true)"
+    if [[ "$current_status" != "Connected" ]]; then
+        # cloudflare-warp can remain Manual/Disconnected while Always On is
+        # already true. Force a false -> true transition so connect is acted on.
+        warp-cli disconnect >/dev/null 2>&1 || true
+        sleep 1
+        warp-cli connect
+    fi
+    if ! wait_for_warp; then
+        echo "[warp-mode] WARP did not reach Connected state; leaving AI routing fail-closed." >&2
+        exit 1
+    fi
+
+    if ! ss -lnt 2>/dev/null | grep -q '127\.0\.0\.1:40000'; then
+        echo "[warp-mode] WARP reports Connected but port 40000 is not listening." >&2
+        warp-cli disconnect >/dev/null 2>&1 || true
+        exit 1
+    fi
+
+    if ! verify_us_exit; then
+        echo "[warp-mode] WARP exit could not be verified as US; disconnecting for safety." >&2
+        warp-cli disconnect >/dev/null 2>&1 || true
+        exit 1
+    fi
+
+    echo "[warp-mode] ON — Connected, local proxy ready, US exit verified."
+}
+
+disable_warp() {
+    echo "[warp-mode] Disabling WARP routing..."
+
+    warp-cli disconnect || true
+    echo "[warp-mode] OFF — Antigravity remains fail-closed; it will not fall back to an IDC node."
+}
+
+show_status() {
+    echo "=== WARP ==="
+    if ! timeout 8 warp-cli status; then
+        echo "WARP daemon did not answer within 8 seconds."
+    fi
+    echo
+    echo "=== agy routing ==="
+
+    if grep -q '^mode: rule$' "$GENERATED" 2>/dev/null \
+       && grep -q "PROCESS-NAME,agy,WARP-LOCAL" "$GENERATED" 2>/dev/null \
+       && grep -q 'name: WARP-LOCAL' "$GENERATED" 2>/dev/null; then
+        echo "Mihomo agy -> WARP-LOCAL: CONFIGURED"
+    else
+        echo "Mihomo agy -> WARP-LOCAL: NOT CONFIGURED"
+    fi
+}
+
+case "${1:-}" in
+    on)
+        enable_warp
+        ;;
+    off)
+        disable_warp
+        ;;
+    status)
+        show_status
+        ;;
+    toggle)
+        if warp-cli status 2>/dev/null | grep -q '^Status update: Connected'; then
+            disable_warp
+        else
+            enable_warp
+        fi
+        ;;
+    *)
+        echo "Usage: warp-mode {on|off|toggle|status}"
+        exit 1
+        ;;
+esac
