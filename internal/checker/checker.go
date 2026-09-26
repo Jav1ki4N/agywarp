@@ -1,6 +1,7 @@
 package checker
 
 import (
+	"agywarp/internal/proxymode"
 	"bufio"
 	"context"
 	"crypto/tls"
@@ -14,15 +15,16 @@ import (
 
 // ExitVerification holds the result of inspecting the outbound WARP proxy exit.
 type ExitVerification struct {
-	IsWarp   bool          `json:"is_warp"`
-	Loc      string        `json:"loc"`
-	IP       string        `json:"ip"`
-	Colo     string        `json:"colo"`
-	Latency  time.Duration `json:"latency"`
-	Endpoint string        `json:"endpoint"`
+	IsWarp    bool             `json:"is_warp"`
+	Loc       string           `json:"loc"`
+	IP        string           `json:"ip"`
+	Colo      string           `json:"colo"`
+	Latency   time.Duration    `json:"latency"`
+	Endpoint  string           `json:"endpoint"`
+	APIProbes []APIProbeResult `json:"api_probes,omitempty"`
 }
 
-// Checker verifies connectivity through the local SOCKS5 WARP proxy.
+// Checker verifies connectivity through the local WARP proxy.
 type Checker interface {
 	VerifyExit(ctx context.Context, socks5Addr string) (*ExitVerification, error)
 	CheckPortListening(ctx context.Context, addr string) bool
@@ -30,7 +32,9 @@ type Checker interface {
 
 // HTTPChecker performs verification via Cloudflare trace endpoint.
 type HTTPChecker struct {
-	TraceURL string
+	proxyMode proxymode.Selection
+	TraceURL  string
+	ProbeURLs []string
 }
 
 // NewChecker constructs a new HTTPChecker instance.
@@ -81,16 +85,9 @@ func ParseTraceResponseBody(body string) *ExitVerification {
 	return verif
 }
 
-// VerifyExit queries the Cloudflare trace endpoint via SOCKS5 proxy and parses output.
+// VerifyExit queries the Cloudflare trace endpoint via the selected local proxy and parses output.
 func (c *HTTPChecker) VerifyExit(ctx context.Context, socks5Addr string) (*ExitVerification, error) {
-	if socks5Addr == "" {
-		socks5Addr = "127.0.0.1:40000"
-	}
-	if !strings.HasPrefix(socks5Addr, "socks5://") {
-		socks5Addr = "socks5://" + socks5Addr
-	}
-
-	proxyURL, err := url.Parse(socks5Addr)
+	proxyURL, err := c.proxyMode.Get().URL(socks5Addr)
 	if err != nil {
 		return nil, fmt.Errorf("parsing proxy URL: %w", err)
 	}
@@ -101,6 +98,12 @@ func (c *HTTPChecker) VerifyExit(ctx context.Context, socks5Addr string) (*ExitV
 			InsecureSkipVerify: true, // match legacy --insecure behavior
 		},
 		DisableKeepAlives: true,
+		OnProxyConnectResponse: func(_ context.Context, proxy *url.URL, req *http.Request, resp *http.Response) error {
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("HTTP CONNECT proxy %s rejected target %s: %s", proxy.Host, req.Host, resp.Status)
+			}
+			return nil
+		},
 	}
 
 	client := &http.Client{
@@ -133,3 +136,5 @@ func (c *HTTPChecker) VerifyExit(ctx context.Context, socks5Addr string) (*ExitV
 
 	return verif, nil
 }
+
+func (c *HTTPChecker) SetProxyMode(mode proxymode.Mode) { c.proxyMode.Set(mode) }

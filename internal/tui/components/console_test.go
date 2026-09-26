@@ -5,8 +5,49 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
+
+func TestConsoleWrapPreservesDiagnosticAndScrolls(t *testing.T) {
+	c := NewConsole()
+	c.Clear()
+	c.SetSize(48, 12)
+	c.AddLog("WARN", "API metadata: CREDENTIALS_MISSING service=cloudcode-pa.googleapis.com method=PredictionService.FetchAvailableModels")
+	rendered := c.Render()
+	if strings.Contains(rendered, "…") || !strings.Contains(rendered, "API metadata:") {
+		t.Fatalf("diagnostic was truncated: %s", rendered)
+	}
+	if lipgloss.Height(rendered) != 12 || c.totalLines < 2 {
+		t.Fatalf("invalid wrapped layout: %s", rendered)
+	}
+	for _, line := range strings.Split(rendered, "\n") {
+		if lipgloss.Width(line) > 48 {
+			t.Fatalf("line overflow: %s", line)
+		}
+	}
+	c.Clear()
+	c.SetSize(80, 5)
+	for i := 0; i < 20; i++ {
+		c.AddLog("INFO", fmt.Sprintf("record-%02d", i))
+	}
+	if !strings.Contains(c.Render(), "record-19") {
+		t.Fatal("latest log missing")
+	}
+	c.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if strings.Contains(c.Render(), "record-19") {
+		t.Fatal("page up did not move away from tail")
+	}
+	before := c.Render()
+	c.AddLog("INFO", "record-20")
+	if c.Render() != before {
+		t.Fatal("new log moved the historical view")
+	}
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if !strings.Contains(c.Render(), "record-20") {
+		t.Fatal("End did not restore tail")
+	}
+}
 
 func TestConsoleHeightStrictlyMaintained(t *testing.T) {
 	c := NewConsole()

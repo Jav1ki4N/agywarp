@@ -45,6 +45,21 @@ func TestNetworkCardRender(t *testing.T) {
 	}
 }
 
+func TestNetworkCardOuterRoute(t *testing.T) {
+	card := NewNetworkCard()
+	card.Width, card.Height = 48, 13
+	card.OuterNode = "US node"
+	card.OuterProvider = "Subscription"
+	card.OuterAirport = "My Airport"
+	card.OuterStatus = "MISMATCH"
+	rendered := card.Render()
+	for _, value := range []string{"WARP outer route", "US node", "Subscription", "My Airport", "MISMATCH"} {
+		if !strings.Contains(rendered, value) {
+			t.Fatalf("missing %q in card: %s", value, rendered)
+		}
+	}
+}
+
 func TestNetworkCardFieldSpinnerNoTitleSpinner(t *testing.T) {
 	card := NewNetworkCard()
 	card.Width = 40

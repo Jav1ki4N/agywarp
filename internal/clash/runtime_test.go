@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"agywarp/internal/proxymode"
 	"gopkg.in/yaml.v3"
 )
 
@@ -106,13 +107,24 @@ func TestRuntimeLifecycleUsesPayloadAndPreservesBase(t *testing.T) {
 		handler.ServeHTTP(recorder, r)
 		return recorder.Result(), nil
 	})}}
+	m.SetProxyMode(proxymode.HTTP)
 	ctx := context.Background()
 	if err := m.BootstrapRuntime(ctx, 40000); err != nil {
 		t.Fatal(err)
 	}
+	var bootstrapDoc yaml.Node
+	if err := yaml.Unmarshal(loaded, &bootstrapDoc); err != nil {
+		t.Fatal(err)
+	}
+	if got := field(field(bootstrapDoc.Content[0], "proxies").Content[0], "type").Value; got != "http" {
+		t.Fatalf("bootstrap proxy type %s", got)
+	}
 	rule := "PROCESS-NAME,example,AGYWARP-WARP"
 	if _, err := m.StartRuntime(ctx, []string{rule}, 40000, true); err != nil {
 		t.Fatal(err)
+	}
+	if mode, err := m.SessionProxyMode(); err != nil || mode != proxymode.HTTP {
+		t.Fatalf("session mode %s %v", mode, err)
 	}
 	check, err := m.Preflight(ctx)
 	if err != nil || !check.Active || !check.WarpConnectedByUs {
@@ -249,5 +261,21 @@ func TestPreflightReportsPersistentRule(t *testing.T) {
 	_, err := m.Preflight(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "PROCESS-NAME,agy,WARP-LOCAL") || !strings.Contains(err.Error(), ":3") {
 		t.Fatalf("expected precise rule location, got %v", err)
+	}
+}
+
+func TestBuildRuntimeHTTPMode(t *testing.T) {
+	base := []byte("proxies: []\nrules: [MATCH,DIRECT]\n")
+	result, err := BuildRuntimeWithMode(base, nil, 41000, proxymode.HTTP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(result, &doc); err != nil {
+		t.Fatal(err)
+	}
+	proxy := field(doc.Content[0], "proxies").Content[0]
+	if field(proxy, "type").Value != "http" || field(proxy, "port").Value != "41000" {
+		t.Fatalf("wrong proxy: %s", result)
 	}
 }

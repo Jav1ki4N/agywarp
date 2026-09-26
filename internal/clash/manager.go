@@ -1,6 +1,7 @@
 package clash
 
 import (
+	"agywarp/internal/proxymode"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -37,6 +38,7 @@ type Manager interface {
 
 // SystemdManager manages Clash Verge / Mihomo via files and Unix socket API.
 type SystemdManager struct {
+	proxyMode  proxymode.Selection
 	BaseDir    string
 	SocketPath string
 	HTTPClient *http.Client // optional controller transport for embedded clients and tests
@@ -512,3 +514,5 @@ func (m *SystemdManager) ReloadMihomo(ctx context.Context) error {
 func (m *SystemdManager) InjectProfileRules(ctx context.Context, proxyGroupName string) error {
 	return nil
 }
+
+func (m *SystemdManager) SetProxyMode(mode proxymode.Mode) { m.proxyMode.Set(mode) }

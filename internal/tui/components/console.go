@@ -1,7 +1,6 @@
 package components
 
 import (
-	"fmt"
 	"image/color"
 	"strings"
 	"time"
@@ -10,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // LogMsg represents a log event sent to the console
@@ -28,11 +28,13 @@ type LogEntry struct {
 // Console represents a terminal-like command output / log panel
 type Console struct {
 	ComponentBase
-	Title       string
-	Logs        []LogEntry
-	maxLogs     int
-	Active      bool
-	SpinnerView string
+	Title        string
+	Logs         []LogEntry
+	maxLogs      int
+	scrollOffset int
+	totalLines   int
+	Active       bool
+	SpinnerView  string
 
 	// Dynamic colors calculated from terminal background
 	DelimFg color.Color
@@ -65,6 +67,21 @@ func (c *Console) SetSize(w, h int) {
 
 // AddLog appends a structured log entry to the buffer
 func (c *Console) AddLog(level, message string) {
+	if c.scrollOffset > 0 {
+		prefixWidth := 16
+		switch strings.ToUpper(level) {
+		case "OK", "SUCCESS":
+			prefixWidth = 14
+		case "ERR", "ERROR":
+			prefixWidth = 15
+		}
+		rows := 1
+		if width := c.Width - prefixWidth; width > 0 {
+			clean := strings.ReplaceAll(strings.ReplaceAll(message, "\r", ""), "\n", " ")
+			rows = len(strings.Split(ansi.Wrap(clean, width, ""), "\n"))
+		}
+		c.scrollOffset += rows
+	}
 	entry := LogEntry{
 		Time:    time.Now(),
 		Level:   level,
@@ -79,6 +96,8 @@ func (c *Console) AddLog(level, message string) {
 // Clear clears all logs in the console buffer
 func (c *Console) Clear() {
 	c.Logs = nil
+	c.scrollOffset = 0
+	c.totalLines = 0
 }
 
 func (c *Console) Init() tea.Cmd {
@@ -93,6 +112,29 @@ func (c *Console) Update(msg tea.Msg) tea.Cmd {
 		c.TitleFg = styles.ElevateColor(msg, 75) // Output title
 		c.TimeFg = styles.ElevateColor(msg, 65)  // Timestamp prefix
 		c.TextFg = styles.ElevateColor(msg, 130) // Crisp, readable log text
+	case tea.KeyPressMsg:
+		page := c.Height - 2
+		if page < 1 {
+			page = 1
+		}
+		switch msg.String() {
+		case "pgup":
+			c.scrollOffset += page
+		case "pgdown":
+			c.scrollOffset -= page
+		case "end":
+			c.scrollOffset = 0
+		}
+		maxOffset := c.totalLines - (c.Height - 1)
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		if c.scrollOffset > maxOffset {
+			c.scrollOffset = maxOffset
+		}
+		if c.scrollOffset < 0 {
+			c.scrollOffset = 0
+		}
 	case LogMsg:
 		c.AddLog(msg.Level, msg.Message)
 	}
@@ -145,6 +187,9 @@ func (c *Console) Render() string {
 	titleStyle := lipgloss.NewStyle().Foreground(titleFg).Bold(false)
 
 	titlePart := "── " + c.Title + " "
+	if c.Width >= 55 {
+		titlePart += "(PgUp PgDn · End latest · o expand) "
+	}
 	titleWidth := lipgloss.Width(titlePart)
 
 	var delimLine string
@@ -161,11 +206,8 @@ func (c *Console) Render() string {
 		return delimLine
 	}
 
-	// 2. Visible logs (Tail auto-scroll: display latest N entries)
+	// Wrap the buffered logs before selecting the visible page.
 	visibleLogs := c.Logs
-	if len(visibleLogs) > availableHeight {
-		visibleLogs = visibleLogs[len(visibleLogs)-availableHeight:]
-	}
 
 	renderedLines := make([]string, 0, availableHeight)
 	for i, entry := range visibleLogs {
@@ -188,40 +230,49 @@ func (c *Console) Render() string {
 			badgeWidth = 6
 		}
 
-		// Clean message: remove newlines & carriage returns to strictly maintain single line
+		// Normalize embedded line breaks before wrapping to the available width.
 		cleanMsg := strings.ReplaceAll(entry.Message, "\r", "")
 		cleanMsg = strings.ReplaceAll(cleanMsg, "\n", " ")
 
 		// If this is the latest in-progress entry while active, append spinner
 		var spinnerSuffix string
-		var spinnerWidth int
 		if c.Active && c.SpinnerView != "" && i == len(visibleLogs)-1 && strings.HasSuffix(cleanMsg, "...") {
 			spinnerSuffix = " " + c.SpinnerView
-			spinnerWidth = 1 + lipgloss.Width(c.SpinnerView)
 		}
 
-		// Truncate message text so it fits within c.Width without wrapping
-		// prefix: ts (8) + space (1) + badge + space (1)
-		prefixWidth := 8 + 1 + badgeWidth + 1 + spinnerWidth
-		maxMsgWidth := c.Width - prefixWidth
-		if maxMsgWidth > 0 && lipgloss.Width(cleanMsg) > maxMsgWidth {
-			cleanMsg = truncateVisualString(cleanMsg, maxMsgWidth)
+		prefix := lipgloss.NewStyle().Foreground(timeFg).Render(ts) + " " + badge + " "
+		prefixWidth := 8 + 1 + badgeWidth + 1
+		messageWidth := c.Width - prefixWidth
+		if messageWidth < 1 {
+			renderedLines = append(renderedLines, ansi.Truncate(prefix+cleanMsg, c.Width, "…"))
+			continue
 		}
-
-		tsStyled := lipgloss.NewStyle().Foreground(timeFg).Render(ts)
-		msgStyled := lipgloss.NewStyle().Foreground(textFg).Render(cleanMsg)
-		line := fmt.Sprintf("%s %s %s%s", tsStyled, badge, msgStyled, spinnerSuffix)
-		renderedLines = append(renderedLines, line)
+		parts := strings.Split(ansi.Wrap(cleanMsg+spinnerSuffix, messageWidth, ""), "\n")
+		for j, part := range parts {
+			linePrefix := prefix
+			if j > 0 {
+				linePrefix = strings.Repeat(" ", prefixWidth)
+			}
+			renderedLines = append(renderedLines, linePrefix+lipgloss.NewStyle().Foreground(textFg).Render(part))
+		}
 	}
 
-	// Pad with blank lines if fewer entries exist to guarantee constant console height
+	c.totalLines = len(renderedLines)
+	maxOffset := c.totalLines - availableHeight
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if c.scrollOffset > maxOffset {
+		c.scrollOffset = maxOffset
+	}
+	end := len(renderedLines) - c.scrollOffset
+	start := end - availableHeight
+	if start < 0 {
+		start = 0
+	}
+	renderedLines = renderedLines[start:end]
 	for len(renderedLines) < availableHeight {
 		renderedLines = append(renderedLines, "")
-	}
-
-	// Clamping: ensure exactly availableHeight lines
-	if len(renderedLines) > availableHeight {
-		renderedLines = renderedLines[len(renderedLines)-availableHeight:]
 	}
 
 	logContent := strings.Join(renderedLines, "\n")

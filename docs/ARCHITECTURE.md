@@ -5,10 +5,10 @@
 ## Scope and components
 
 agywarp is a Linux TUI for routing selected processes through Cloudflare WARP's
-local SOCKS5 proxy and Clash Verge Rev's Mihomo core. `internal/process` stores
+local SOCKS5 or HTTP CONNECT proxy and Clash Verge Rev's Mihomo core. `internal/process` stores
 process groups and scans running processes. `internal/clash` builds temporary
 Mihomo configs and calls its controller. `internal/warp` operates `warp-cli`;
-`internal/checker` verifies the exit; `internal/tui` coordinates the workflow.
+`internal/tui` coordinates the workflow.
 
 The Clash adapter assumes a generated base config at
 `~/.local/share/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml`
@@ -17,14 +17,15 @@ generated file. Other Mihomo clients require a different adapter.
 
 ## Disk writes and live state
 
-| Item | ON / test | OFF / recovery |
+| Item | ON | OFF / recovery |
 | --- | --- | --- |
 | Generated `clash-verge.yaml` and raw subscriptions | Read only; agywarp does not rewrite them. | Read only; Clash Verge may regenerate the base independently. |
-| Mihomo live config | Reloaded through `PUT /configs?force=true` with an inline payload. | Reloaded from the current generated base and checked through the controller. |
-| `<Clash Verge base>/.agywarp/session.json` | Created after full runtime rules are loaded and verified. | Deleted after successful OFF; `recover` can remove a stale session. |
+| Mihomo live config | Reloaded through `PUT /configs?force=true` with an inline payload. | Reloaded from the current generated base. |
+| `<Clash Verge base>/.agywarp/session.json` | Created after full runtime rules are loaded. | Deleted after successful OFF; `recover` can remove a stale session. |
 | Airport rule and proxy enhancements | Not written by dynamic injection. | OFF removes specific legacy agywarp WARP entries if present; `recover` does not clean them. |
 | `~/.config/agywarp/profiles.json` | Read to compile enabled process groups. | Unchanged by ON/OFF. Creating or editing groups, or initializing defaults, saves it. |
-| WARP daemon | agywarp calls Connect only if it was not already CONNECTED before ON or a manual test. | OFF disconnects only if agywarp connected it; `recover` leaves it unchanged. |
+| `~/.config/agywarp/settings.json` | Read for the local proxy protocol preference; `p` saves it atomically while OFF and idle. | Kept across OFF/recovery. Respects `XDG_CONFIG_HOME`. |
+| WARP daemon | agywarp calls Connect only if it was not already CONNECTED before ON. | OFF disconnects only if agywarp connected it; `recover` leaves it unchanged. |
 
 The session is written via a synced temporary file and atomic rename. Legacy
 enhancement cleanup also uses a temporary file and rename. Forced termination
@@ -47,34 +48,40 @@ other applications. Group editing is locked while the tunnel is ON or changing
 state. An enabled group does not imply that its process is currently running;
 process discovery is display data.
 
-## ON, test, and OFF
+## ON and OFF
 
-ON first loads a bootstrap config built in memory. It adds a local SOCKS5
-proxy named `AGYWARP-WARP` and a `PROCESS-NAME,warp-svc,...` guard, but no
+ON first loads a bootstrap config built in memory. It adds a local proxy using the selected SOCKS5 or HTTP protocol,
+named `AGYWARP-WARP` and a `PROCESS-NAME,warp-svc,...` guard, but no
 application rules yet. The guard targets the last `MATCH` rule's proxy or
 group in the generated base; without `MATCH`, it uses `DIRECT`. Targets
 `REJECT`, `REJECT-DROP`, `WARP-LOCAL`, and `AGYWARP-WARP` are rejected. This
 does not pin a subscription node on disk.
 
-If WARP was not already CONNECTED, agywarp calls Connect, waits for the local
-proxy, and verifies that the proxy exits through WARP. It then loads the full in-memory
-config with enabled process rules. Only after checking those rules are live
-does it create `session.json`. The session records the base path and SHA-256
+If WARP was not already CONNECTED, agywarp calls Connect and waits for the local
+proxy. It then loads the full in-memory config with enabled process rules and
+creates `session.json`. The session records the base path and SHA-256
 hash, expected rules, whether agywarp connected WARP, the active airport UID,
-and manual selector choices. A startup failure attempts to reload the base
+manual selector choices, and the local proxy protocol. A startup failure attempts to reload the base
 and restore WARP's previous connection state.
 
-With Network Card focused and the tunnel OFF, `t` performs a temporary test
-along the same outer route. It restores the base and prior WARP connection
-state and creates no session. Network Card `space` starts or stops the tunnel.
+Network Card `space` starts or stops the tunnel. `p` switches the local proxy
+protocol while OFF and idle; it is locked during active operations. HTTP CONNECT
+supports TCP targets only; it does not change the outer WARP UDP tunnel.
+No automatic fallback is used. Active sessions keep their recorded protocol
+on restart; older sessions default to SOCKS5.
+
+The Network Card displays the node, Mihomo proxy provider, and current airport.
+A proxy provider is a named Mihomo proxy collection and is separate from the
+airport profile. Inline nodes may have no provider. See
+[Getting started](GETTING_STARTED.md#warp-outer-route).
 
 OFF requires a session. It checks the base path; if the base changed, it
 refuses to restore a changed base with persistent WARP routing rules. It
 removes known legacy WARP rules from the rule enhancements referenced by
 `profiles.yaml`, and removes a `WARP-LOCAL` SOCKS5 proxy only when its address
 is `127.0.0.1:40000`. It does not scan raw subscriptions, merge enhancements,
-or scripts. OFF then loads the current base into Mihomo, verifies that live
-WARP rules, guard, and proxies are gone, deletes the session, and disconnects
+or scripts. OFF then loads the current base into Mihomo, removes the runtime
+WARP rules, guard, and proxies, deletes the session, and disconnects
 WARP if agywarp originally connected it. A failed step reports an error.
 
 ## Switching airports and nodes
@@ -92,7 +99,7 @@ If the dashboard is unavailable but a session is active, `agywarp stop`
 performs OFF from the CLI. If OFF fails, inspect the reported condition before
 changing more routing state.
 
-## Interrupted runs and proof of cleanup
+## Interrupted runs and recovery
 
 An interrupted bootstrap can leave a live `warp-svc` guard or
 `AGYWARP-WARP` proxy without application rules or a session. Preflight detects
@@ -102,20 +109,6 @@ reloads the clean generated base and removes a stale session; it leaves WARP's
 connection state unchanged. It refuses an active session, a changed base hash
 when a session exists, and a base containing runtime application rules. Use
 `agywarp stop` for an active session.
-
-A clean OFF requires several checks, not just one file:
-
-1. `session.json` is absent.
-2. Live Mihomo `/rules` has no `warp-svc` or rule targeting `AGYWARP-WARP` or
-   `WARP-LOCAL`; live `/proxies` has neither reserved proxy.
-3. The generated base and relevant airport enhancements have no persistent
-   agywarp WARP entries.
-4. WARP is back in its prior connection state when agywarp owned the change.
-
-The program verifies live artifacts during OFF and preflight. Inspecting all
-inactive airport files and leftover temporary files requires a separate disk
-check. TUN being enabled and a successful WARP exit test do not prove that
-every selected application's traffic enters Mihomo.
 
 ## TUI structure
 

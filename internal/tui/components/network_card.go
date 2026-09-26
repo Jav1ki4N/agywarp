@@ -9,19 +9,26 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type NetworkCard struct {
 	ComponentBase
-	Title         string
-	ServiceStatus string
-	WarpStatus    string
-	Protocol      string
-	ExitCountry   string
-	ExitIP        string
-	Colo          string
-	Latency       string
-	MihomoRule    string
+	Title           string
+	ServiceStatus   string
+	WarpStatus      string
+	Protocol        string
+	ProxyMode       string
+	ProxyModeLocked bool
+	ExitCountry     string
+	ExitIP          string
+	Colo            string
+	Latency         string
+	MihomoRule      string
+	OuterNode       string
+	OuterProvider   string
+	OuterAirport    string
+	OuterStatus     string
 
 	Refreshing  bool
 	SpinnerView string
@@ -41,11 +48,16 @@ func NewNetworkCard() NetworkCard {
 		ServiceStatus: "INACTIVE [OFF]",
 		WarpStatus:    "DISCONNECTED",
 		Protocol:      "---",
+		ProxyMode:     "SOCKS5",
 		ExitCountry:   "---",
 		ExitIP:        "---",
 		Colo:          "---",
 		Latency:       "---",
 		MihomoRule:    "UNCONFIGURED",
+		OuterNode:     "---",
+		OuterProvider: "---",
+		OuterAirport:  "---",
+		OuterStatus:   "UNOBSERVED",
 		DelimFg:       styles.ColorDarkGray,
 		TitleFg:       styles.ColorDimGray,
 		LabelFg:       styles.ColorDimGray,
@@ -156,7 +168,7 @@ func (n *NetworkCard) Render() string {
 		} else {
 			valStr = lipgloss.NewStyle().Foreground(activeColor).Bold(true).Render(value)
 		}
-		return fmt.Sprintf("  %s %s", lblStr, valStr)
+		return ansi.Truncate(fmt.Sprintf("  %s %s", lblStr, valStr), n.Width, "…")
 	}
 
 	// Determine whether each field is at its default unlaunched value
@@ -209,13 +221,29 @@ func (n *NetworkCard) Render() string {
 		serviceVal = "INACTIVE [OFF]"
 	}
 
+	pathColor := styles.ColorWarning
+	if strings.HasPrefix(n.OuterStatus, "OBSERVED") {
+		pathColor = styles.ColorSuccess
+	} else if n.OuterStatus == "MISMATCH" {
+		pathColor = styles.ColorDanger
+	}
+	modeVal := n.ProxyMode + " [p switch]"
+	if n.ProxyModeLocked {
+		modeVal = n.ProxyMode + " [locked]"
+	}
 	lines := []string{
 		renderRow("Service", serviceVal, serviceDefault, serviceColor),
+		renderRow("Proxy Mode", modeVal, false, textFg),
 		renderRow("WARP Tunnel", warpVal, warpDefault, styles.ColorSuccess),
 		renderRow("Exit Route", exitRouteVal, exitRouteDefault, styles.ColorWhite),
 		renderRow("Exit IP", exitIPVal, exitIPDefault, textFg),
 		renderRow("Latency", latencyVal, latencyDefault, styles.ColorWarning),
 		renderRow("Mihomo Rule", mihomoVal, mihomoDefault, styles.ColorSuccess),
+		delimStyle.Render("  ── WARP outer route"),
+		renderRow("Node", n.OuterNode, n.OuterNode == "---", textFg),
+		renderRow("Provider", n.OuterProvider, n.OuterProvider == "---", textFg),
+		renderRow("Airport", n.OuterAirport, n.OuterAirport == "---", textFg),
+		renderRow("Path", n.OuterStatus, false, pathColor),
 	}
 
 	if len(lines) > availableHeight {

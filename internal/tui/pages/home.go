@@ -9,6 +9,7 @@ import (
 	"agywarp/internal/checker"
 	"agywarp/internal/clash"
 	"agywarp/internal/process"
+	"agywarp/internal/proxymode"
 	"agywarp/internal/traffic"
 	"agywarp/internal/tui/components"
 	"agywarp/internal/tui/styles"
@@ -34,6 +35,7 @@ type WarpDetectedMsg struct {
 // ClashDetectedMsg is delivered upon launch when Clash Verge / Mihomo inspection completes.
 type ClashDetectedMsg struct {
 	Inspection clash.Inspection
+	Route      *clash.OuterRoute
 	Err        error
 }
 
@@ -45,6 +47,7 @@ type TraceResultMsg struct {
 
 // TunnelToggledMsg is emitted when dynamic injection/WARP tunnel state changes.
 type TunnelToggledMsg struct {
+	Route         *clash.OuterRoute
 	Active        bool
 	EnabledGroups int
 	InjectedRules int
@@ -52,16 +55,20 @@ type TunnelToggledMsg struct {
 }
 
 type CurrentNodeTestedMsg struct {
+	Route        *clash.OuterRoute
 	Verification *checker.ExitVerification
 	Err          error
 }
 
 type RouteGuardTickMsg struct {
+	Route  *clash.OuterRoute
 	Change string
 	Err    error
 }
 
 type Home struct {
+	proxyMode    proxymode.Mode
+	settingsPath string
 	PageBase
 	InitialTunnelActive bool
 	processList         components.ProcessList
@@ -70,6 +77,7 @@ type Home struct {
 	editor              components.GroupEditor
 	picker              components.ProcessPicker
 	console             components.Console
+	outputExpanded      bool
 	footer              components.Footer
 	scanner             process.Scanner
 	store               *process.Store
@@ -100,6 +108,7 @@ func (h *Home) Init() tea.Cmd {
 	h.clashManager = clash.NewManager()
 	h.checker = checker.NewChecker()
 	h.console = components.NewConsole()
+	h.initProxyMode()
 	h.footer = components.NewFooter()
 	h.scanner = process.NewScanner()
 	h.focusIndex = 0
@@ -163,13 +172,17 @@ func (h *Home) Init() tea.Cmd {
 func (h *Home) routeGuardTickCmd() tea.Cmd {
 	active, busy, manager := h.tunnelActive, h.tunnelBusy, h.clashManager
 	return tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-		if !active || busy || manager == nil {
+		if busy || manager == nil {
 			return RouteGuardTickMsg{}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
+		route := inspectOuterRoute(ctx, manager)
+		if !active {
+			return RouteGuardTickMsg{Route: route}
+		}
 		change, err := manager.RuntimeRouteChanged(ctx)
-		return RouteGuardTickMsg{Change: change, Err: err}
+		return RouteGuardTickMsg{Route: route, Change: change, Err: err}
 	})
 }
 
@@ -211,7 +224,7 @@ func (h *Home) detectClashCmd() tea.Cmd {
 		defer cancel()
 
 		insp, err := h.clashManager.Inspect(ctx)
-		return ClashDetectedMsg{Inspection: insp, Err: err}
+		return ClashDetectedMsg{Inspection: insp, Route: inspectOuterRoute(ctx, h.clashManager), Err: err}
 	}
 }
 
@@ -223,7 +236,14 @@ func (h *Home) checkTraceCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		verif, err := h.checker.VerifyExit(ctx, "127.0.0.1:40000")
+		status, err := h.warpClient.Status(ctx)
+		if err != nil {
+			return TraceResultMsg{Err: err}
+		}
+		if status.Mode != "WarpProxy" || status.ProxyPort < 1 {
+			return TraceResultMsg{Err: fmt.Errorf("WARP local proxy is not configured")}
+		}
+		verif, err := h.checker.VerifyExit(ctx, fmt.Sprintf("127.0.0.1:%d", status.ProxyPort))
 		return TraceResultMsg{Verification: verif, Err: err}
 	}
 }
@@ -288,6 +308,7 @@ func (h *Home) applyFocus() {
 			components.Hint("tab: next block"),
 			spaceHint,
 			components.Hint("t: test node"),
+			components.Hint("p: proxy mode"),
 			components.Hint("r: refresh"),
 			components.Hint("q: quit"),
 		}
@@ -299,28 +320,28 @@ func (h *Home) applyFocus() {
 
 // testCurrentNode uses the current Mihomo warp-svc route and restores the
 // bootstrap config and WARP connection state before reporting its result.
-func testCurrentNode(ctx context.Context, manager clash.Manager, client warp.Client, verifier checker.Checker) (result *checker.ExitVerification, err error) {
+func testCurrentNode(ctx context.Context, manager clash.Manager, client warp.Client, verifier checker.Checker) (result *checker.ExitVerification, route *clash.OuterRoute, err error) {
 	status, err := client.Status(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("WARP status: %w", err)
+		return nil, route, fmt.Errorf("WARP status: %w", err)
 	}
 	if status.Mode != "WarpProxy" || status.ProxyPort < 1 {
-		return nil, fmt.Errorf("WARP must use WarpProxy mode with a valid port")
+		return nil, route, fmt.Errorf("WARP must use WarpProxy mode with a valid port")
 	}
 	if status.Status == "CONNECTING" || status.Status == "DISCONNECTING" {
-		return nil, fmt.Errorf("WARP is %s; retry when its state settles", status.Status)
+		return nil, route, fmt.Errorf("WARP is %s; retry when its state settles", status.Status)
 	}
 	check, err := manager.Preflight(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("Mihomo preflight: %w", err)
+		return nil, route, fmt.Errorf("Mihomo preflight: %w", err)
 	}
 	if check.Active {
-		return nil, fmt.Errorf("agywarp runtime is already active")
+		return nil, route, fmt.Errorf("agywarp runtime is already active")
 	}
 	connectedByUs := status.Status != "CONNECTED"
 	connectAttempted := false
 	defer func() {
-		restoreCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		restoreCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 		defer cancel()
 		if restoreErr := manager.AbortBootstrap(restoreCtx); restoreErr != nil {
 			if err == nil {
@@ -328,7 +349,6 @@ func testCurrentNode(ctx context.Context, manager clash.Manager, client warp.Cli
 			} else {
 				err = fmt.Errorf("%v; restore failed: %w; WARP left connected", err, restoreErr)
 			}
-			result = nil
 			return
 		}
 		if connectAttempted {
@@ -338,33 +358,41 @@ func testCurrentNode(ctx context.Context, manager clash.Manager, client warp.Cli
 				} else {
 					err = fmt.Errorf("%v; WARP disconnect failed: %w", err, disconnectErr)
 				}
-				result = nil
 			}
 		}
 	}()
 	if err := manager.BootstrapRuntime(ctx, status.ProxyPort); err != nil {
-		return nil, fmt.Errorf("load bootstrap config: %w", err)
+		return nil, route, fmt.Errorf("load bootstrap config: %w", err)
 	}
 	if connectedByUs {
 		connectAttempted = true
 		if err := client.Connect(ctx); err != nil {
-			return nil, fmt.Errorf("connect WARP: %w", err)
+			return nil, route, fmt.Errorf("connect WARP: %w", err)
 		}
 	}
 	readyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	err = waitForWarpProxy(readyCtx, client, verifier, status.ProxyPort)
 	cancel()
 	if err != nil {
-		return nil, err
+		return nil, route, err
 	}
 	result, err = verifier.VerifyExit(ctx, fmt.Sprintf("127.0.0.1:%d", status.ProxyPort))
 	if err != nil {
-		return nil, fmt.Errorf("WARP exit verification: %w", err)
+		err = fmt.Errorf("WARP exit verification: %w", err)
+		// Keep manual API diagnostics independent of trace success.
+		result = &checker.ExitVerification{}
+	} else if result == nil || !result.IsWarp {
+		err = fmt.Errorf("WARP exit verification did not confirm WARP")
 	}
-	if result == nil || !result.IsWarp {
-		return nil, fmt.Errorf("WARP exit verification did not confirm WARP")
+	if result == nil {
+		result = &checker.ExitVerification{}
 	}
-	return result, nil
+
+	if prober, ok := verifier.(checker.APIProber); ok {
+		result.APIProbes = prober.ProbeAPIs(ctx, fmt.Sprintf("127.0.0.1:%d", status.ProxyPort))
+	}
+	route = observeOuterRoute(ctx, manager)
+	return result, route, err
 }
 
 func (h *Home) testCurrentNodeCmd() tea.Cmd {
@@ -374,12 +402,12 @@ func (h *Home) testCurrentNodeCmd() tea.Cmd {
 	}
 	h.tunnelBusy = true
 	h.applyFocus()
-	h.console.AddLog("INFO", "Testing WARP through the current Mihomo outer route...")
+	h.console.AddLog("INFO", "Testing WARP through the current Mihomo outer route ("+h.proxyMode.Label()+")...")
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 		defer cancel()
-		verification, err := testCurrentNode(ctx, h.clashManager, h.warpClient, h.checker)
-		return CurrentNodeTestedMsg{Verification: verification, Err: err}
+		verification, route, err := testCurrentNode(ctx, h.clashManager, h.warpClient, h.checker)
+		return CurrentNodeTestedMsg{Verification: verification, Route: route, Err: err}
 	}
 }
 
@@ -436,7 +464,7 @@ func (h *Home) toggleTunnelCmd() tea.Cmd {
 	}
 	h.tunnelBusy = true
 	if !h.tunnelActive {
-		h.console.AddLog("INFO", "Starting WARP and checking its local proxy...")
+		h.console.AddLog("INFO", "Starting WARP and checking its local proxy ("+h.proxyMode.Label()+")...")
 		var rules []string
 		enabledCount := 0
 		for _, p := range h.processList.Profiles {
@@ -462,7 +490,7 @@ func (h *Home) toggleTunnelCmd() tea.Cmd {
 			}
 			connectedByUs := status.Status != "CONNECTED"
 			if err := h.clashManager.BootstrapRuntime(ctx, status.ProxyPort); err != nil {
-				restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 40*time.Second)
 				defer restoreCancel()
 				if restoreErr := h.clashManager.AbortBootstrap(restoreCtx); restoreErr != nil {
 					return TunnelToggledMsg{Err: fmt.Errorf("load bootstrap config: %w; restore failed: %v", err, restoreErr)}
@@ -470,7 +498,7 @@ func (h *Home) toggleTunnelCmd() tea.Cmd {
 				return TunnelToggledMsg{Err: fmt.Errorf("load bootstrap config: %w", err)}
 			}
 			rollback := func(cause error) tea.Msg {
-				restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 40*time.Second)
 				defer restoreCancel()
 				if err := h.clashManager.AbortBootstrap(restoreCtx); err != nil {
 					return TunnelToggledMsg{Err: fmt.Errorf("%v; restore failed: %w; WARP left connected", cause, err)}
@@ -497,15 +525,16 @@ func (h *Home) toggleTunnelCmd() tea.Cmd {
 			if err != nil || verification == nil || !verification.IsWarp {
 				return rollback(fmt.Errorf("WARP exit verification failed: %v", err))
 			}
+			route := observeOuterRoute(ctx, h.clashManager)
 			count, err := h.clashManager.StartRuntime(ctx, rules, status.ProxyPort, connectedByUs)
 			if err != nil {
 				return rollback(fmt.Errorf("load runtime config: %w", err))
 			}
-			return TunnelToggledMsg{Active: true, EnabledGroups: enabledCount, InjectedRules: count}
+			return TunnelToggledMsg{Active: true, EnabledGroups: enabledCount, InjectedRules: count, Route: route}
 		}
 	}
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 		defer cancel()
 		connectedByUs, err := h.clashManager.StopRuntime(ctx)
 		if err != nil {
@@ -621,6 +650,16 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 		return h, nil
 
 	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "o", "O":
+			h.outputExpanded = !h.outputExpanded
+			return h, nil
+		case "pgup", "pgdown", "end":
+			return h, h.console.Update(msg)
+		}
+		if h.outputExpanded && msg.String() != "q" && msg.String() != "ctrl+c" {
+			return h, nil
+		}
 		if h.focusIndex == 0 && (h.tunnelActive || h.tunnelBusy) {
 			switch msg.String() {
 			case "a", "e", "d", "m", " ", "space":
@@ -644,6 +683,11 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 				h.console.AddLog("INFO", "Refreshing network & tunnel status...")
 				return h, h.triggerNetworkRefresh()
 			}
+		case "p", "P":
+			if h.focusIndex == 1 {
+				h.switchProxyMode()
+				return h, nil
+			}
 		case "t", "T":
 			if h.focusIndex == 1 {
 				return h, h.testCurrentNodeCmd()
@@ -660,16 +704,24 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 		return h, h.toggleTunnelCmd()
 
 	case CurrentNodeTestedMsg:
+		h.showOuterRoute(msg.Route, true)
 		h.tunnelBusy = false
 		h.applyFocus()
 		if msg.Err != nil {
-			h.console.AddLog("ERR", fmt.Sprintf("Current outer route failed WARP test: %v", msg.Err))
-		} else {
-			h.console.AddLog("OK", fmt.Sprintf("Current outer route works with WARP: %s (%s, %dms)", msg.Verification.IP, msg.Verification.Loc, msg.Verification.Latency.Milliseconds()))
+			h.console.AddLog("ERR", fmt.Sprintf("WARP test or restoration failed: %v", msg.Err))
+		}
+		if msg.Verification != nil {
+			if msg.Verification.IsWarp {
+				h.console.AddLog("OK", fmt.Sprintf("WARP exit verified: %s (%s, %dms)", msg.Verification.IP, msg.Verification.Loc, msg.Verification.Latency.Milliseconds()))
+			} else {
+				h.console.AddLog("WARN", "WARP exit unverified; API probes below are independent transport diagnostics")
+			}
+			h.showAPIProbes(msg.Verification.APIProbes)
 		}
 		return h, h.triggerNetworkRefresh()
 
 	case RouteGuardTickMsg:
+		h.showOuterRoute(msg.Route, false)
 		next := h.routeGuardTickCmd()
 		if msg.Err != nil {
 			if h.tunnelActive && h.routeGuardError != msg.Err.Error() {
@@ -687,6 +739,7 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 		return h, next
 
 	case TunnelToggledMsg:
+		h.showOuterRoute(msg.Route, msg.Active)
 		h.tunnelBusy = false
 		if !msg.Active {
 			h.routeGuardTriggered = false
@@ -806,6 +859,7 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 		return h, nil
 
 	case ClashDetectedMsg:
+		h.showOuterRoute(msg.Route, false)
 		if msg.Inspection.Installed {
 			subName := msg.Inspection.ActiveProfileName
 			if subName == "" {
@@ -1019,8 +1073,20 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 }
 
 func (h *Home) Render() string {
+	h.networkCard.ProxyModeLocked = h.tunnelActive || h.tunnelBusy || h.refreshingNetwork
 	if h.Width <= 0 || h.Height <= 0 {
 		return "agywarp\n" + h.processList.Render() + "\n" + h.trafficChart.Render() + "\n" + h.console.Render() + "\n" + h.footer.Render()
+	}
+
+	if h.outputExpanded {
+		height := h.Height - h.footer.Height
+		if height < 1 {
+			height = 1
+		}
+		h.console.SetSize(h.Width, height)
+		footer := h.footer
+		footer.Hints = []components.FooterHint{components.Hint("o: dashboard"), components.Hint("PgUp/PgDn: scroll"), components.Hint("End: latest")}
+		return lipgloss.JoinVertical(lipgloss.Left, h.console.Render(), footer.Render())
 	}
 
 	// 1. Calculate Heights
@@ -1031,21 +1097,26 @@ func (h *Home) Render() string {
 	}
 
 	// Dynamic height distribution:
-	// - Top cards: ~40% (Process List & Network Card)
-	// - Middle traffic chart: ~28% (Traffic Chart)
-	// - Bottom console: ~32% (Console Logs)
-	trafficHeight := int(float64(available) * 0.28)
+	// - Top cards: ~35%; traffic: ~20%; output: ~45%.
+	trafficHeight := int(float64(available) * 0.20)
 	if trafficHeight < 5 && available >= 14 {
 		trafficHeight = 5
 	}
-	consoleHeight := int(float64(available) * 0.32)
+	consoleHeight := int(float64(available) * 0.45)
 	if consoleHeight < 4 && available >= 14 {
 		consoleHeight = 4
 	}
 	cardsHeight := available - trafficHeight - consoleHeight
 	if cardsHeight < 4 && available >= 14 {
 		cardsHeight = 4
-		trafficHeight = (available - cardsHeight) / 2
+		trafficHeight = (available - cardsHeight) / 3
+		consoleHeight = available - cardsHeight - trafficHeight
+	}
+
+	// Keep the outer-route section visible when the terminal has enough space.
+	if available >= 23 && cardsHeight < 13 {
+		cardsHeight = 13
+		trafficHeight = (available - cardsHeight) / 3
 		consoleHeight = available - cardsHeight - trafficHeight
 	}
 

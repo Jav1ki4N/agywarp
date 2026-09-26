@@ -1,6 +1,7 @@
 package clash
 
 import (
+	"agywarp/internal/proxymode"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -35,11 +36,12 @@ type RuntimeCheck struct {
 }
 
 type runtimeSession struct {
-	BasePath          string        `json:"base_path"`
-	BaseHash          string        `json:"base_hash"`
-	Rules             []string      `json:"rules"`
-	WarpConnectedByUs bool          `json:"warp_connected_by_us"`
-	Route             routeSnapshot `json:"route,omitempty"`
+	ProxyMode         proxymode.Mode `json:"proxy_mode,omitempty"`
+	BasePath          string         `json:"base_path"`
+	BaseHash          string         `json:"base_hash"`
+	Rules             []string       `json:"rules"`
+	WarpConnectedByUs bool           `json:"warp_connected_by_us"`
+	Route             routeSnapshot  `json:"route,omitempty"`
 }
 
 func (m *SystemdManager) basePath() string { return filepath.Join(m.BaseDir, "clash-verge.yaml") }
@@ -50,9 +52,13 @@ func (m *SystemdManager) sessionPath() string {
 func (m *SystemdManager) controller(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
 	client := m.HTTPClient
 	if client == nil {
+		timeout := 5 * time.Second
+		if method == http.MethodPut {
+			timeout = 20 * time.Second
+		}
 		client = &http.Client{Transport: &http.Transport{DialContext: func(c context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(c, "unix", m.SocketPath)
-		}}, Timeout: 5 * time.Second}
+		}}, Timeout: timeout}
 	}
 	req, err := http.NewRequestWithContext(ctx, method, "http://localhost"+path, bytes.NewReader(body))
 	if err != nil {
@@ -119,6 +125,13 @@ func scalar(value string) *yaml.Node {
 
 // BuildRuntime creates a complete config in memory. The source bytes are never modified.
 func BuildRuntime(base []byte, rules []string, port int) ([]byte, error) {
+	return BuildRuntimeWithMode(base, rules, port, proxymode.SOCKS5)
+}
+
+func BuildRuntimeWithMode(base []byte, rules []string, port int, mode proxymode.Mode) ([]byte, error) {
+	if !mode.Valid() {
+		return nil, fmt.Errorf("invalid proxy mode %q", mode)
+	}
 	if port < 1 || port > 65535 {
 		return nil, fmt.Errorf("invalid WARP proxy port %d", port)
 	}
@@ -140,7 +153,7 @@ func BuildRuntime(base []byte, rules []string, port int) ([]byte, error) {
 		}
 	}
 	proxy := &yaml.Node{Kind: yaml.MappingNode}
-	for _, kv := range [][2]string{{"name", runtimeProxy}, {"type", "socks5"}, {"server", "127.0.0.1"}, {"port", fmt.Sprint(port)}} {
+	for _, kv := range [][2]string{{"name", runtimeProxy}, {"type", string(mode)}, {"server", "127.0.0.1"}, {"port", fmt.Sprint(port)}} {
 		v := scalar(kv[1])
 		if kv[0] == "port" {
 			v.Tag = "!!int"
@@ -388,7 +401,7 @@ func (m *SystemdManager) StartRuntime(ctx context.Context, rules []string, port 
 	if err != nil {
 		return 0, err
 	}
-	runtime, err := BuildRuntime(base, rules, port)
+	runtime, err := BuildRuntimeWithMode(base, rules, port, m.proxyMode.Get())
 	if err != nil {
 		return 0, err
 	}
@@ -409,7 +422,7 @@ func (m *SystemdManager) StartRuntime(ctx context.Context, rules []string, port 
 		rollbackErr := m.loadPayload(ctx, base)
 		return 0, fmt.Errorf("verify runtime rules: missing %v, read error %v; rollback: %v", expected, err, rollbackErr)
 	}
-	session := runtimeSession{BasePath: check.BasePath, BaseHash: check.BaseHash, Rules: rules, WarpConnectedByUs: connectedByUs, Route: route}
+	session := runtimeSession{ProxyMode: m.proxyMode.Get(), BasePath: check.BasePath, BaseHash: check.BaseHash, Rules: rules, WarpConnectedByUs: connectedByUs, Route: route}
 	data, _ := json.MarshalIndent(session, "", "  ")
 	if err := writeSession(m.sessionPath(), data); err != nil {
 		rollbackErr := m.loadPayload(ctx, base)
@@ -473,7 +486,7 @@ func (m *SystemdManager) BootstrapRuntime(ctx context.Context, port int) error {
 	if err != nil {
 		return err
 	}
-	bootstrap, err := BuildRuntime(base, nil, port)
+	bootstrap, err := BuildRuntimeWithMode(base, nil, port, m.proxyMode.Get())
 	if err != nil {
 		return err
 	}
@@ -487,7 +500,7 @@ func (m *SystemdManager) AbortBootstrap(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := m.loadPayload(ctx, base); err != nil {
+	if err := m.restoreBase(ctx, base); err != nil {
 		return err
 	}
 	live, err := m.liveRuntimeArtifacts(ctx)
@@ -498,6 +511,30 @@ func (m *SystemdManager) AbortBootstrap(ctx context.Context) error {
 		return fmt.Errorf("runtime rules remain after bootstrap restore: %v", live)
 	}
 	return nil
+}
+
+// A timed-out PUT has an unknown outcome. Verify cleanup before reporting failure;
+// never disconnect WARP merely because the controller stopped answering.
+func (m *SystemdManager) restoreBase(ctx context.Context, base []byte) error {
+	err := m.loadPayload(ctx, base)
+	if err == nil {
+		return nil
+	}
+	var networkError net.Error
+	if !(errors.As(err, &networkError) && networkError.Timeout()) && !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if ctx.Err() != nil {
+		return err
+	}
+	live, inspectErr := m.liveRuntimeArtifacts(ctx)
+	if inspectErr == nil && len(live) == 0 {
+		return nil
+	}
+	if inspectErr != nil {
+		return fmt.Errorf("%w; cannot verify cleanup: %v", err, inspectErr)
+	}
+	return fmt.Errorf("%w; runtime artifacts still present: %v", err, live)
 }
 
 func (m *SystemdManager) StopRuntime(ctx context.Context) (bool, error) {
@@ -537,7 +574,7 @@ func (m *SystemdManager) StopRuntime(ctx context.Context) (bool, error) {
 	if err := m.cleanLegacyWARP(); err != nil {
 		return false, fmt.Errorf("clean legacy profile WARP entries: %w", err)
 	}
-	if err := m.loadPayload(ctx, base); err != nil {
+	if err := m.restoreBase(ctx, base); err != nil {
 		return false, err
 	}
 	live, err := m.liveRuntimeArtifacts(ctx)
@@ -596,7 +633,7 @@ func (m *SystemdManager) RecoverRuntime(ctx context.Context) error {
 	if len(live) > 0 && sessionErr == nil {
 		return errors.New("runtime session is active; stop from Network Card")
 	}
-	if err := m.loadPayload(ctx, base); err != nil {
+	if err := m.restoreBase(ctx, base); err != nil {
 		return err
 	}
 	live, err = m.liveRuntimeArtifacts(ctx)
@@ -610,4 +647,23 @@ func (m *SystemdManager) RecoverRuntime(ctx context.Context) error {
 		return os.Remove(m.sessionPath())
 	}
 	return nil
+}
+
+// SessionProxyMode reads the protocol used when the active runtime was created.
+func (m *SystemdManager) SessionProxyMode() (proxymode.Mode, error) {
+	data, err := os.ReadFile(m.sessionPath())
+	if err != nil {
+		return proxymode.SOCKS5, err
+	}
+	var session runtimeSession
+	if err := json.Unmarshal(data, &session); err != nil {
+		return proxymode.SOCKS5, err
+	}
+	if session.ProxyMode == "" {
+		return proxymode.SOCKS5, nil
+	}
+	if !session.ProxyMode.Valid() {
+		return proxymode.SOCKS5, fmt.Errorf("invalid session proxy mode")
+	}
+	return session.ProxyMode, nil
 }

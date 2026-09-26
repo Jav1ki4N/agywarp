@@ -39,7 +39,7 @@ func newRoot() *cobra.Command {
 		Use:   "stop",
 		Short: "Stop an active agywarp session and clean legacy profile WARP entries",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 20*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), 45*time.Second)
 			defer cancel()
 			owned, err := clash.NewManager().StopRuntime(ctx)
 			if err != nil {
@@ -58,7 +58,7 @@ func newRoot() *cobra.Command {
 		Use:   "recover",
 		Short: "Restore clean Mihomo config after an interrupted agywarp session",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), 40*time.Second)
 			defer cancel()
 			if err := clash.NewManager().RecoverRuntime(ctx); err != nil {
 				return err

@@ -4,10 +4,10 @@
 
 ## 适用范围与组件
 
-agywarp 是 Linux TUI：它让选定进程通过 Cloudflare WARP 的本地 SOCKS5 代理和
+agywarp 是 Linux TUI：它让选定进程通过 Cloudflare WARP 的本地 SOCKS5 或 HTTP CONNECT 代理和
 Clash Verge Rev 的 Mihomo 内核出站。`internal/process` 保存进程组并扫描进程；
 `internal/clash` 构造临时 Mihomo 配置并调用控制接口；`internal/warp` 操作
-`warp-cli`；`internal/checker` 验证出口；`internal/tui` 协调这些操作。
+`warp-cli`；`internal/tui` 协调这些操作。
 
 当前 Clash 适配器假定生成配置位于
 `~/.local/share/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml`，
@@ -16,14 +16,15 @@ Clash Verge Rev 的 Mihomo 内核出站。`internal/process` 保存进程组并�
 
 ## 磁盘写入与实时状态
 
-| 对象 | ON／测试时 | OFF／恢复时 |
+| 对象 | ON 时 | OFF／恢复时 |
 | --- | --- | --- |
 | 生成的 `clash-verge.yaml` 和原始订阅 | 只读，agywarp 不改写。 | 只读；Clash Verge 可能自行重新生成基础配置。 |
-| Mihomo 实时配置 | 通过 `PUT /configs?force=true` 加载内联配置。 | 从当前生成的基础配置重载，并通过控制接口核验。 |
-| `<Clash Verge 基础目录>/.agywarp/session.json` | 完整运行规则加载并核验后创建。 | OFF 成功后删除；`recover` 可删除过期会话。 |
+| Mihomo 实时配置 | 通过 `PUT /configs?force=true` 加载内联配置。 | 从当前生成的基础配置重载。 |
+| `<Clash Verge 基础目录>/.agywarp/session.json` | 完整运行规则加载后创建。 | OFF 成功后删除；`recover` 可删除过期会话。 |
 | 机场规则／代理扩展 | 动态注入期间不写入。 | OFF 仅在发现旧版 agywarp WARP 条目时定向清理；`recover` 不清理扩展。 |
 | `~/.config/agywarp/profiles.json` | 读取已启用进程组。 | ON／OFF 不修改；创建、编辑进程组或首次初始化默认组时保存。 |
-| WARP 守护进程 | ON 或手动测试前状态不是 CONNECTED 时，agywarp 才调用 Connect。 | 只有 agywarp 主动连接过，OFF 才断开；`recover` 不改变连接状态。 |
+| `~/.config/agywarp/settings.json` | 保存本地代理协议偏好；OFF 且空闲时按 `p` 原子保存，遵循 `XDG_CONFIG_HOME`。 | OFF／恢复后保留。 |
+| WARP 守护进程 | ON 前状态不是 CONNECTED 时，agywarp 才调用 Connect。 | 只有 agywarp 主动连接过，OFF 才断开；`recover` 不改变连接状态。 |
 
 会话文件先写入临时文件、同步后原子重命名。清理旧扩展也使用临时文件和重命名。
 强制终止可能留下 `session-*.tmp` 或 `.agywarp-clean-*.tmp`；它们不会作为
@@ -42,30 +43,35 @@ TUN、进程匹配和 WARP 的 WarpProxy 模式。基础配置不得持久化 `w
 进程组编辑被锁定。进程组“已启用”不表示对应进程当前正在运行；进程扫描
 仅用于显示。
 
-## ON、测试与 OFF
+## ON 与 OFF
 
-ON 首先加载在内存中构造的引导配置：加入名为 `AGYWARP-WARP` 的本地 SOCKS5
-代理和 `PROCESS-NAME,warp-svc,...` guard，此时尚无应用规则。guard 指向生成
+ON 首先加载在内存中构造的引导配置：加入名为 `AGYWARP-WARP` 的本地代理（采用选定的 SOCKS5 或 HTTP 协议）
+和 `PROCESS-NAME,warp-svc,...` guard，此时尚无应用规则。guard 指向生成
 配置中最后一条 `MATCH` 规则的目标代理或组；若没有 `MATCH`，使用 `DIRECT`。
 目标是 `REJECT`、`REJECT-DROP`、`WARP-LOCAL` 或 `AGYWARP-WARP` 时会拒绝
 启动。这些修改仅存在于 Mihomo 实时配置，不会在磁盘上固定某个订阅节点。
 
 若 WARP 原先不是 CONNECTED，agywarp 会调用 Connect，等待本地代理就绪，
-并验证代理出口确实经过 WARP。之后加载包含已启用进程规则的完整内存配置。
-只有确认规则已在 Mihomo 中生效，才写入 `session.json`。会话记录基础配置
-路径及 SHA-256、预期规则、WARP 是否由 agywarp 连接、当前机场 UID 和手动
-选择组的选项。启动失败会尝试重载基础配置并恢复 WARP 原有连接状态。
+之后加载包含已启用进程规则的完整内存配置，并写入 `session.json`。会话记录基础配置
+路径及 SHA-256、预期规则、WARP 是否由 agywarp 连接、当前机场 UID、手动
+选择组的选项和本地代理协议。启动失败会尝试重载基础配置并恢复 WARP 原有连接状态。
 
-聚焦 Network Card 且隧道为 OFF 时，按 `t` 可沿同一外层路由进行临时连接
-测试。测试结束会恢复基础配置和 WARP 原有连接状态，不创建运行会话。
-按空格可开启或关闭隧道。
+聚焦 Network Card 后，按空格可开启或关闭隧道。按 `p` 切换本地代理协议；
+运行或操作期间禁止切换。Mihomo 临时代理采用选定协议，不会自动回退。
+HTTP CONNECT 仅承载 TCP 目标连接，不承载应用 UDP；外层 WARP UDP 隧道不变。
+重新打开运行中的会话时采用会话记录的协议，旧会话默认使用 SOCKS5。
 
 OFF 需要会话文件。它核对基础配置路径；若基础配置已改变，且新配置含持久化
 WARP 路由规则，则拒绝自动恢复。它会清除 `profiles.yaml` 引用的机场规则扩展
 中已知的旧版 WARP 规则；仅当 `WARP-LOCAL` 是 `127.0.0.1:40000` 的 SOCKS5
 代理时删除该代理。它不扫描原始订阅、合并扩展或脚本。随后 OFF 将当前基础
-配置加载到 Mihomo，确认实时 WARP 规则、guard 和代理均已消失，再删除
+配置加载到 Mihomo，移除实时 WARP 规则、guard 和代理，再删除
 会话；只有 agywarp 原先连接了 WARP，才会断开它。任一步骤失败都会报错。
+
+### Network Card
+
+Network Card 显示节点、Mihomo proxy provider 和当前机场。proxy provider 是
+Mihomo 中具名的代理集合，与机场订阅名称不同；静态节点可能没有 provider。
 
 ## 切换机场与节点
 
@@ -78,7 +84,7 @@ WARP 路由规则，则拒绝自动恢复。它会清除 `profiles.yaml` 引用�
 仪表盘无法使用但会话仍在时，可运行 `agywarp stop` 执行 OFF。若 OFF 报错，
 应先检查错误原因，再继续调整路由。
 
-## 中断恢复与清理核验
+## 中断恢复
 
 引导阶段中断，可能只留下实时 `warp-svc` guard 或 `AGYWARP-WARP` 代理，
 没有应用规则与会话。预检会识别这种孤立状态。Clash Verge 在外部重载也可能
@@ -86,18 +92,6 @@ WARP 路由规则，则拒绝自动恢复。它会清除 `profiles.yaml` 引用�
 生成配置并删除过期会话；它不会改变 WARP 连接状态。若会话仍处于活动状态、
 会话存在但基础配置哈希已变化，或基础配置含运行时应用规则，它会拒绝执行。
 活动会话应使用 `agywarp stop`。
-
-确认 OFF 干净，不能只看一个文件，应同时核对：
-
-1. `session.json` 不存在。
-2. Mihomo 实时 `/rules` 没有 `warp-svc`、指向 `AGYWARP-WARP` 或
-   `WARP-LOCAL` 的规则；实时 `/proxies` 也没有这两个保留代理。
-3. 生成的基础配置和相关机场扩展没有持久化的 agywarp WARP 条目。
-4. 若连接原由 agywarp 建立，WARP 已恢复到之前的连接状态。
-
-程序在 OFF 和预检期间核验实时残留；检查所有未启用机场文件及遗留临时文件
-仍需单独检查磁盘。TUN 已启用、WARP 出口验证成功，也不能单独证明每个
-选定应用的流量都进入了 Mihomo。
 
 ## TUI 结构
 

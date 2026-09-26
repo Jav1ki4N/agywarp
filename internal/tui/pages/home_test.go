@@ -23,6 +23,16 @@ type testNodeManager struct {
 	clash.Manager
 	bootstrapCalls int
 	abortCalls     int
+	routeCalls     int
+	abortErr       error
+}
+
+func (m *testNodeManager) InspectOuterRoute(context.Context) (clash.OuterRoute, error) {
+	m.routeCalls++
+	if m.bootstrapCalls != 1 || m.abortCalls != 0 {
+		return clash.OuterRoute{}, fmt.Errorf("route inspection must run while bootstrap is live")
+	}
+	return clash.OuterRoute{Status: "OBSERVED", Node: "Test node"}, nil
 }
 
 func (m *testNodeManager) Preflight(context.Context) (clash.RuntimeCheck, error) {
@@ -35,7 +45,17 @@ func (m *testNodeManager) BootstrapRuntime(context.Context, int) error {
 }
 func (m *testNodeManager) AbortBootstrap(context.Context) error {
 	m.abortCalls++
-	return nil
+	return m.abortErr
+}
+
+func TestCurrentNodeRetainsProbeResultsWhenRestoreFails(t *testing.T) {
+	manager := &testNodeManager{abortErr: fmt.Errorf("controller unavailable")}
+	client := &testNodeWarpClient{fixedWarpClient: fixedWarpClient{status: warp.StatusInfo{Status: "DISCONNECTED", Mode: "WarpProxy", ProxyPort: 40000}}}
+	prober := &apiTestChecker{testNodeChecker: testNodeChecker{&checker.ExitVerification{IsWarp: true}}, manager: manager}
+	result, _, err := testCurrentNode(context.Background(), manager, client, prober)
+	if err == nil || result == nil || len(result.APIProbes) != 1 || client.disconnectCalls != 0 {
+		t.Fatalf("result=%+v err=%v disconnects=%d", result, err, client.disconnectCalls)
+	}
 }
 
 type testNodeWarpClient struct {
@@ -60,6 +80,33 @@ func (c *testNodeWarpClient) Disconnect(context.Context) error {
 
 type testNodeChecker struct{ verification *checker.ExitVerification }
 
+type apiTestChecker struct {
+	testNodeChecker
+	manager *testNodeManager
+	address string
+}
+
+func (c *apiTestChecker) ProbeAPIs(_ context.Context, addr string) []checker.APIProbeResult {
+	c.address = addr
+	if c.manager.abortCalls != 0 {
+		return nil
+	}
+	return []checker.APIProbeResult{{Endpoint: "https://cloudcode-pa.googleapis.com/", StatusCode: 403}}
+}
+
+func TestCurrentNodeProbesAPIBeforeRestoring(t *testing.T) {
+	manager := &testNodeManager{}
+	client := &testNodeWarpClient{fixedWarpClient: fixedWarpClient{status: warp.StatusInfo{Status: "DISCONNECTED", Mode: "WarpProxy", ProxyPort: 41000}}}
+	prober := &apiTestChecker{testNodeChecker: testNodeChecker{&checker.ExitVerification{IsWarp: true}}, manager: manager}
+	result, _, err := testCurrentNode(context.Background(), manager, client, prober)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prober.address != "127.0.0.1:41000" || len(result.APIProbes) != 1 || manager.abortCalls != 1 || client.status.Status != "DISCONNECTED" {
+		t.Fatalf("result=%+v address=%s manager=%+v client=%+v", result, prober.address, manager, client)
+	}
+}
+
 func (c testNodeChecker) CheckPortListening(context.Context, string) bool { return true }
 func (c testNodeChecker) VerifyExit(context.Context, string) (*checker.ExitVerification, error) {
 	return c.verification, nil
@@ -80,9 +127,12 @@ func TestCurrentNodeRestoresState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			manager := &testNodeManager{}
 			client := &testNodeWarpClient{fixedWarpClient: fixedWarpClient{status: warp.StatusInfo{Status: tc.initial, Mode: "WarpProxy", ProxyPort: 40000}}}
-			result, err := testCurrentNode(context.Background(), manager, client, testNodeChecker{&checker.ExitVerification{IsWarp: tc.isWarp}})
-			if (err != nil) != tc.wantErr || (result != nil) == tc.wantErr {
+			result, route, err := testCurrentNode(context.Background(), manager, client, testNodeChecker{&checker.ExitVerification{IsWarp: tc.isWarp}})
+			if (err != nil) != tc.wantErr || result == nil || result.IsWarp != tc.isWarp {
 				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			if !tc.wantErr && (route == nil || route.Status != "OBSERVED" || manager.routeCalls != 1) {
+				t.Fatalf("missing route evidence: route=%+v calls=%d", route, manager.routeCalls)
 			}
 			if manager.bootstrapCalls != 1 || manager.abortCalls != 1 || client.connectCalls != tc.wantDialed || client.disconnectCalls != tc.wantDialed || client.status.Status != tc.initial {
 				t.Fatalf("state not restored: manager=%+v client=%+v", manager, client)
@@ -676,5 +726,26 @@ func TestHomeLocksProfileEditsWhileTunnelActive(t *testing.T) {
 	home.Update(components.OpenGroupCreateMsg{})
 	if home.editor.Open {
 		t.Fatal("editor opened while tunnel was active")
+	}
+}
+
+type failedTraceProber struct{ apiTestChecker }
+
+func (c *failedTraceProber) VerifyExit(context.Context, string) (*checker.ExitVerification, error) {
+	return nil, fmt.Errorf("HTTP CONNECT: 502 Bad Gateway")
+}
+func TestCurrentNodeProbesAndCleansUpAfterTraceFailure(t *testing.T) {
+	manager := &testNodeManager{}
+	client := &testNodeWarpClient{fixedWarpClient: fixedWarpClient{status: warp.StatusInfo{Status: "DISCONNECTED", Mode: "WarpProxy", ProxyPort: 41000}}}
+	prober := &failedTraceProber{apiTestChecker: apiTestChecker{manager: manager}}
+	result, route, err := testCurrentNode(context.Background(), manager, client, prober)
+	if err == nil || !strings.Contains(err.Error(), "502 Bad Gateway") {
+		t.Fatalf("trace error lost: %v", err)
+	}
+	if result == nil || result.IsWarp || len(result.APIProbes) != 1 || prober.address != "127.0.0.1:41000" {
+		t.Fatalf("diagnostics %+v address %s", result, prober.address)
+	}
+	if route == nil || manager.abortCalls != 1 || client.disconnectCalls != 1 || client.status.Status != "DISCONNECTED" {
+		t.Fatalf("route %+v manager %+v client %+v", route, manager, client)
 	}
 }
