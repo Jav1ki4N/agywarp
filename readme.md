@@ -25,7 +25,7 @@ the tunnel is stopped.
 
 ### Why
 
-This tool is originally built to proxy [**Google Antigravity**](https://antigravity.google/) CLI / **VS Code** Extension through CloudFlare warp service, as common proxy services' IP can be easily blocked by Google for being an IDC IP.  
+This tool is originally built to proxy [**Google Antigravity**](https://antigravity.google/) CLI and its **VS Code** Extension through CloudFlare warp service, as common proxy services' IP can be easily blocked by Google for being an IDC IP.  
 
 Process-specific WARP routing requires Mihomo rules and the WARP daemon to
 work together. agywarp provides one control to load the selected process

@@ -169,7 +169,7 @@ func (p *ProcessList) Render() string {
 		titleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(styles.ColorPrimary)
-		delimStyle = lipgloss.NewStyle().Foreground(styles.ColorDimGray)
+		delimStyle = lipgloss.NewStyle().Foreground(delimFg)
 	} else {
 		titleStyle = lipgloss.NewStyle().
 			Bold(false).

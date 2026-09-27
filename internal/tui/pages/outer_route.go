@@ -66,7 +66,13 @@ func (h *Home) showOuterRoute(route *clash.OuterRoute, log bool) {
 		return
 	}
 	if strings.HasPrefix(route.Status, "OBSERVED") {
-		h.console.AddLog("OK", fmt.Sprintf("WARP UDP route observed: %s; airport: %s; provider: %s; chains: %s", route.Node, route.Airport, route.Provider, strings.Join(route.Chains, "; ")))
+		source := route.Airport
+		if source == "" || source == "---" {
+			source = route.Provider
+		} else if route.Provider != "" && route.Provider != "---" && route.Provider != source {
+			source += " (" + route.Provider + ")"
+		}
+		h.console.AddLog("INFO", fmt.Sprintf("WARP UDP route · %s · Source: %s", route.Node, source))
 	} else {
 		h.console.AddLog("WARN", fmt.Sprintf("WARP outer path %s: connectivity alone does not confirm the selected node", route.Status))
 		if route.Detail != "" {

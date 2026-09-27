@@ -70,9 +70,10 @@ supports TCP targets only; it does not change the outer WARP UDP tunnel.
 No automatic fallback is used. Active sessions keep their recorded protocol
 on restart; older sessions default to SOCKS5.
 
-The Network Card displays the node, Mihomo proxy provider, and current airport.
-A proxy provider is a named Mihomo proxy collection and is separate from the
-airport profile. Inline nodes may have no provider. See
+The Network Card displays the node and a combined Source row: the current
+airport name, with a distinct Mihomo proxy provider appended in parentheses.
+Without an airport name, Source uses the provider name. Inline nodes may have
+no provider. See
 [Getting started](GETTING_STARTED.md#warp-outer-route).
 
 OFF requires a session. It checks the base path; if the base changed, it

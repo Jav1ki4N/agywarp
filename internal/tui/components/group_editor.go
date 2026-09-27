@@ -625,17 +625,12 @@ func (e *GroupEditor) Render() string {
 		lines = append(lines, lipgloss.NewStyle().Foreground(dimFg).Render("    (press Enter to append path, e.g. /home/i4N/.gemini/bin/agy or agy)"))
 	}
 
-	// 5. Bottom action bar
-	bottomHint := lipgloss.NewStyle().Foreground(dimFg).
-		Render("  [ctrl+s: Save Group]   [tab: switch field]   [ctrl+v/paste: Paste]   [esc: Cancel]")
-
-	for len(lines) < availableHeight-1 {
+	for len(lines) < availableHeight {
 		lines = append(lines, "")
 	}
-	if len(lines) > availableHeight-1 {
-		lines = lines[:availableHeight-1]
+	if len(lines) > availableHeight {
+		lines = lines[:availableHeight]
 	}
-	lines = append(lines, bottomHint)
 
 	content := strings.Join(lines, "\n")
 	boxStyle := lipgloss.NewStyle().

@@ -235,8 +235,8 @@ func TestHomeProfileLaunchLoggingAndPersistence(t *testing.T) {
 		}
 	}
 
-	if !foundReading {
-		t.Fatalf("expected launch log output 'Reading profiles from %s', logs: %v", expectedPath, home.console.Logs)
+	if foundReading {
+		t.Fatalf("unexpected redundant reading log for %s, logs: %v", expectedPath, home.console.Logs)
 	}
 	if !foundLoaded {
 		t.Fatalf("expected launch log output 'Loaded ... from %s', logs: %v", expectedPath, home.console.Logs)
@@ -299,7 +299,7 @@ func TestHomeWarpCliLaunchDetection(t *testing.T) {
 
 	foundDetectedLog := false
 	for _, entry := range home.console.Logs {
-		if strings.Contains(entry.Message, "Detected warp-cli at /usr/bin/warp-cli") {
+		if strings.Contains(entry.Message, "WARP v2026.7.1377.0") {
 			foundDetectedLog = true
 			break
 		}
@@ -358,10 +358,10 @@ func TestHomeClashInspectionLaunchDetection(t *testing.T) {
 	foundVergeLog := false
 	foundSocketLog := false
 	for _, entry := range home.console.Logs {
-		if strings.Contains(entry.Message, "Detected Clash Verge Rev (active profile: MockAirport)") {
+		if strings.Contains(entry.Message, "Source: MockAirport") {
 			foundVergeLog = true
 		}
-		if strings.Contains(entry.Message, "Mihomo core v1.19.29 active") {
+		if strings.Contains(entry.Message, "Mihomo v1.19.29") {
 			foundSocketLog = true
 		}
 	}
@@ -402,8 +402,8 @@ func TestHomeNetworkCardRefreshAndStatusChangeLogging(t *testing.T) {
 			break
 		}
 	}
-	if !foundRefreshLog {
-		t.Fatalf("expected log 'Refreshing network & tunnel status...' on refresh trigger, logs: %v", home.console.Logs)
+	if foundRefreshLog {
+		t.Fatalf("unexpected redundant refresh log, logs: %v", home.console.Logs)
 	}
 
 	// 2. Test status change logging on WarpDetectedMsg
@@ -425,10 +425,10 @@ func TestHomeNetworkCardRefreshAndStatusChangeLogging(t *testing.T) {
 	foundWarpStatusChange := false
 	foundProtocolChange := false
 	for _, entry := range home.console.Logs {
-		if strings.Contains(entry.Message, "WARP tunnel status changed: CONNECTED -> DISCONNECTED") {
+		if strings.Contains(entry.Message, "WARP status: CONNECTED -> DISCONNECTED") {
 			foundWarpStatusChange = true
 		}
-		if strings.Contains(entry.Message, "WARP protocol changed: MASQUE -> WireGuard") {
+		if strings.Contains(entry.Message, "CONNECTED -> DISCONNECTED · WireGuard") {
 			foundProtocolChange = true
 		}
 	}
@@ -455,7 +455,7 @@ func TestHomeNetworkCardRefreshAndStatusChangeLogging(t *testing.T) {
 
 	foundClashChange := false
 	for _, entry := range home.console.Logs {
-		if strings.Contains(entry.Message, "Mihomo rule status changed: SYNCED (6 rules) -> DESYNCED") {
+		if strings.Contains(entry.Message, "Mihomo rules: SYNCED (6 rules) -> DESYNCED") {
 			foundClashChange = true
 			break
 		}
@@ -488,13 +488,13 @@ func TestHomeNetworkCardRefreshAndStatusChangeLogging(t *testing.T) {
 	foundCountryChange := false
 	foundColoChange := false
 	for _, entry := range home.console.Logs {
-		if strings.Contains(entry.Message, "WARP exit IP changed: 104.28.195.192 -> 104.28.200.5") {
+		if strings.Contains(entry.Message, "WARP exit changed · 104.28.200.5") {
 			foundExitChange = true
 		}
-		if strings.Contains(entry.Message, "WARP exit country changed: US -> SG") {
+		if strings.Contains(entry.Message, "104.28.200.5 · SG") {
 			foundCountryChange = true
 		}
-		if strings.Contains(entry.Message, "WARP colo changed: LAX -> SIN") {
+		if strings.Contains(entry.Message, "SG · SIN") {
 			foundColoChange = true
 		}
 	}

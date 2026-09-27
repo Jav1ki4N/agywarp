@@ -67,8 +67,10 @@ type RouteGuardTickMsg struct {
 }
 
 type Home struct {
-	proxyMode    proxymode.Mode
-	settingsPath string
+	warpAnnounced  bool
+	clashAnnounced bool
+	proxyMode      proxymode.Mode
+	settingsPath   string
 	PageBase
 	InitialTunnelActive bool
 	processList         components.ProcessList
@@ -90,7 +92,7 @@ type Home struct {
 	pendingChecks       int
 	tunnelActive        bool
 	tunnelBusy          bool
-	focusIndex          int // 0: ProcessList, 1: NetworkCard
+	focusIndex          int // 0: ProcessList, 1: NetworkCard, 2: Console
 	lastRunning         []process.RunningProcess
 	routeGuardTriggered bool
 	routeGuardError     string
@@ -134,7 +136,6 @@ func (h *Home) Init() tea.Cmd {
 	store, err := process.NewStore()
 	if err == nil {
 		h.store = store
-		h.console.AddLog("INFO", fmt.Sprintf("Reading profiles from %s", store.Path))
 		loaded, loadErr := store.Load()
 		if loadErr == nil {
 			h.processList.Profiles = loaded
@@ -254,8 +255,6 @@ func (h *Home) saveProfiles() {
 	}
 	if err := h.store.Save(h.processList.Profiles); err != nil {
 		h.console.AddLog("ERR", fmt.Sprintf("Failed to save profiles to %s: %v", h.store.Path, err))
-	} else {
-		h.console.AddLog("INFO", fmt.Sprintf("Saved %d profile(s) to %s", len(h.processList.Profiles), h.store.Path))
 	}
 }
 
@@ -275,7 +274,7 @@ func (h *Home) triggerScanCmd() tea.Cmd {
 func (h *Home) applyFocus() {
 	h.processList.Focused = (h.focusIndex == 0)
 	h.networkCard.Focused = (h.focusIndex == 1)
-	h.console.Focused = false
+	h.console.Focused = (h.focusIndex == 2)
 
 	switch h.focusIndex {
 	case 0:
@@ -314,6 +313,14 @@ func (h *Home) applyFocus() {
 		}
 		if h.tunnelActive {
 			h.footer.Hints[2] = components.Hint("OFF before switching airport/node", styles.ColorWarning)
+		}
+	case 2:
+		h.footer.Hints = []components.FooterHint{
+			components.Hint("tab: next block"),
+			components.Hint("o: expand"),
+			components.Hint("PgUp/PgDn: scroll"),
+			components.Hint("End: latest"),
+			components.Hint("q: quit"),
 		}
 	}
 }
@@ -553,7 +560,7 @@ func (h *Home) toggleTunnelCmd() tea.Cmd {
 func (h *Home) Cleanup() {}
 
 func (h *Home) cycleFocus(delta int) {
-	totalBlocks := 2
+	totalBlocks := 3
 	h.focusIndex = (h.focusIndex + delta + totalBlocks) % totalBlocks
 	h.applyFocus()
 }
@@ -653,6 +660,8 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 		switch msg.String() {
 		case "o", "O":
 			h.outputExpanded = !h.outputExpanded
+			h.focusIndex = 2
+			h.applyFocus()
 			return h, nil
 		case "pgup", "pgdown", "end":
 			return h, h.console.Update(msg)
@@ -680,7 +689,6 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 			}
 		case "r", "R":
 			if h.focusIndex == 1 {
-				h.console.AddLog("INFO", "Refreshing network & tunnel status...")
 				return h, h.triggerNetworkRefresh()
 			}
 		case "p", "P":
@@ -712,9 +720,7 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 		}
 		if msg.Verification != nil {
 			if msg.Verification.IsWarp {
-				h.console.AddLog("OK", fmt.Sprintf("WARP exit verified: %s (%s, %dms)", msg.Verification.IP, msg.Verification.Loc, msg.Verification.Latency.Milliseconds()))
-			} else {
-				h.console.AddLog("WARN", "WARP exit unverified; API probes below are independent transport diagnostics")
+				h.console.AddLog("OK", fmt.Sprintf("WARP exit · %s · %s · %dms", msg.Verification.IP, msg.Verification.Loc, msg.Verification.Latency.Milliseconds()))
 			}
 			h.showAPIProbes(msg.Verification.APIProbes)
 		}
@@ -760,23 +766,19 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 		if msg.Active {
 			h.networkCard.ServiceStatus = "ACTIVE [ON]"
 			if msg.InjectedRules > 0 {
-				h.console.AddLog("OK", fmt.Sprintf("Dynamically injected %d rule(s) for %d active profile(s) into Mihomo", msg.InjectedRules, msg.EnabledGroups))
+				h.console.AddLog("OK", fmt.Sprintf("Routing ON · %d groups · %d rules · %s", msg.EnabledGroups, msg.InjectedRules, h.proxyMode.Label()))
 			} else {
-				h.console.AddLog("WARN", "No process rules were loaded")
+				h.console.AddLog("WARN", "Routing ON · no process rules loaded")
 			}
-			h.console.AddLog("OK", "Mihomo hot-reloaded successfully (WARP routing active)")
-			h.console.AddLog("WARN", "Turn OFF before switching airport or node in Clash Verge; keep this dashboard open while ON")
+			h.console.AddLog("WARN", "Turn OFF before switching airport or node; keep this dashboard open while ON")
 		} else {
 			h.networkCard.ServiceStatus = "INACTIVE [OFF]"
-			h.console.AddLog("OK", "Dynamic routing stopped: clean base rules restored")
-			h.console.AddLog("OK", "WARP restored to its prior connection state")
-			h.console.AddLog("OK", "Mihomo hot-reloaded successfully")
+			h.console.AddLog("OK", "Routing OFF · base restored · prior WARP state restored")
 		}
 
 		return h, h.triggerNetworkRefresh()
 
 	case components.RefreshNetworkMsg:
-		h.console.AddLog("INFO", "Refreshing network & tunnel status...")
 		return h, h.triggerNetworkRefresh()
 
 	case ScannedProcessesMsg:
@@ -813,26 +815,11 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 				newProtocol = "---"
 			}
 
-			// Status change logging
-			if prevWarpStatus != "" && prevWarpStatus != "---" && prevWarpStatus != newWarpStatus {
-				h.console.AddLog("INFO", fmt.Sprintf("WARP tunnel status changed: %s -> %s", prevWarpStatus, newWarpStatus))
-			}
-			if prevProtocol != "" && prevProtocol != "---" && prevProtocol != newProtocol {
-				h.console.AddLog("INFO", fmt.Sprintf("WARP protocol changed: %s -> %s", prevProtocol, newProtocol))
-			}
-
-			// Initial launch announcement if prev was default
-			if prevWarpStatus == "DISCONNECTED" || prevWarpStatus == "" {
-				h.console.AddLog("OK", fmt.Sprintf("Detected warp-cli at %s (%s)", msg.Path, verStr))
-				if newWarpStatus == "CONNECTED" {
-					if msg.Status.Mode == "WarpProxy" && msg.Status.ProxyPort > 0 {
-						h.console.AddLog("OK", fmt.Sprintf("Cloudflare WARP daemon is active (mode: WarpProxy on port %d)", msg.Status.ProxyPort))
-					} else {
-						h.console.AddLog("OK", "Cloudflare WARP daemon is active (Connected)")
-					}
-				} else {
-					h.console.AddLog("INFO", fmt.Sprintf("Cloudflare WARP daemon status: %s", newWarpStatus))
-				}
+			if !h.warpAnnounced {
+				h.console.AddLog("OK", fmt.Sprintf("WARP %s · %s · %s · :%d", verStr, newWarpStatus, newProtocol, msg.Status.ProxyPort))
+				h.warpAnnounced = true
+			} else if prevWarpStatus != newWarpStatus || prevProtocol != newProtocol {
+				h.console.AddLog("INFO", fmt.Sprintf("WARP status: %s -> %s · %s", prevWarpStatus, newWarpStatus, newProtocol))
 			}
 
 			h.networkCard.WarpStatus = newWarpStatus
@@ -849,11 +836,11 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 				return h, tea.Batch(h.spinner.Tick, h.checkTraceCmd())
 			}
 		} else {
-			if h.networkCard.WarpStatus != "NOT INSTALLED" && h.networkCard.WarpStatus != "" {
-				h.console.AddLog("WARN", "WARP tunnel status changed: uninstalled or lost")
+			if h.networkCard.WarpStatus != "NOT INSTALLED" {
+				h.console.AddLog("WARN", "warp-cli is not installed or not in PATH")
 			}
 			h.networkCard.WarpStatus = "NOT INSTALLED"
-			h.console.AddLog("WARN", "warp-cli is not installed or not in PATH")
+			h.warpAnnounced = false
 		}
 		h.checkPendingDone()
 		return h, nil
@@ -869,31 +856,24 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 			prevRuleStatus := h.networkCard.MihomoRule
 			newRuleStatus := msg.Inspection.SummaryStatus
 
-			if prevRuleStatus != "UNCONFIGURED" && prevRuleStatus != "" && prevRuleStatus != newRuleStatus {
-				h.console.AddLog("INFO", fmt.Sprintf("Mihomo rule status changed: %s -> %s", prevRuleStatus, newRuleStatus))
-			} else if prevRuleStatus == "UNCONFIGURED" || prevRuleStatus == "" {
-				h.console.AddLog("OK", fmt.Sprintf("Detected Clash Verge Rev (active profile: %s)", subName))
-
+			if !h.clashAnnounced {
 				if msg.Inspection.SocketAvailable {
-					h.console.AddLog("OK", fmt.Sprintf("Mihomo core %s active via %s", msg.Inspection.MihomoVersion, msg.Inspection.SocketPath))
+					h.console.AddLog("OK", fmt.Sprintf("Mihomo %s · Source: %s", msg.Inspection.MihomoVersion, subName))
 				} else {
-					h.console.AddLog("WARN", fmt.Sprintf("Mihomo core socket not reachable at %s", msg.Inspection.SocketPath))
+					h.console.AddLog("WARN", fmt.Sprintf("Mihomo socket unavailable: %s · Source: %s", msg.Inspection.SocketPath, subName))
 				}
-
-				h.console.AddLog("INFO", "agywarp proxy and warp-svc guard are generated in runtime memory")
-
-				if msg.Inspection.WarpRulesCount > 0 {
-					h.console.AddLog("OK", fmt.Sprintf("%d live rule(s) routing through WARP", msg.Inspection.WarpRulesCount))
-				}
+				h.clashAnnounced = true
+			} else if prevRuleStatus != newRuleStatus {
+				h.console.AddLog("INFO", fmt.Sprintf("Mihomo rules: %s -> %s", prevRuleStatus, newRuleStatus))
 			}
 
 			h.networkCard.MihomoRule = newRuleStatus
 		} else {
-			if h.networkCard.MihomoRule != "NOT INSTALLED" && h.networkCard.MihomoRule != "" {
-				h.console.AddLog("WARN", "Clash Verge Rev status changed: directory not found")
+			if h.networkCard.MihomoRule != "NOT INSTALLED" {
+				h.console.AddLog("WARN", "Clash Verge Rev directory not found")
 			}
 			h.networkCard.MihomoRule = "NOT INSTALLED"
-			h.console.AddLog("WARN", "Clash Verge Rev directory not found")
+			h.clashAnnounced = false
 		}
 		h.checkPendingDone()
 		return h, nil
@@ -909,18 +889,12 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 			newColo := msg.Verification.Colo
 			latencyStr := fmt.Sprintf("%dms", msg.Verification.Latency.Milliseconds())
 
-			if prevIP != "---" && prevIP != "" && prevIP != newIP {
-				h.console.AddLog("INFO", fmt.Sprintf("WARP exit IP changed: %s -> %s", prevIP, newIP))
-			}
-			if prevCountry != "---" && prevCountry != "" && prevCountry != newCountry {
-				h.console.AddLog("INFO", fmt.Sprintf("WARP exit country changed: %s -> %s", prevCountry, newCountry))
-			}
-			if prevColo != "---" && prevColo != "" && prevColo != newColo {
-				h.console.AddLog("INFO", fmt.Sprintf("WARP colo changed: %s -> %s", prevColo, newColo))
-			}
-
-			if prevIP == "---" || prevIP == "" {
-				h.console.AddLog("OK", fmt.Sprintf("WARP exit verified: %s (%s, Colo: %s, %s)", newIP, newCountry, newColo, latencyStr))
+			if prevIP != newIP || prevCountry != newCountry || prevColo != newColo {
+				label := "WARP exit"
+				if prevIP != "" && prevIP != "---" {
+					label = "WARP exit changed"
+				}
+				h.console.AddLog("INFO", fmt.Sprintf("%s · %s · %s · %s · %s", label, newIP, newCountry, newColo, latencyStr))
 			}
 
 			h.networkCard.ExitIP = newIP
@@ -1067,15 +1041,24 @@ func (h *Home) Update(msg tea.Msg) (Page, tea.Cmd) {
 		h.applyFocus()
 	case 1:
 		cmds = append(cmds, h.networkCard.Update(msg))
+	case 2:
+		if _, ok := msg.(tea.KeyPressMsg); ok {
+			cmds = append(cmds, h.console.Update(msg))
+		}
 	}
 
 	return h, tea.Batch(cmds...)
 }
 
 func (h *Home) Render() string {
+	h.trafficChart.TunnelActive = h.tunnelActive
 	h.networkCard.ProxyModeLocked = h.tunnelActive || h.tunnelBusy || h.refreshingNetwork
+	footer := h.footer
+	if h.editor.Open {
+		footer.Hints = []components.FooterHint{components.Hint("tab: switch field"), components.Hint("ctrl+s: save group"), components.Hint("esc: exit edit")}
+	}
 	if h.Width <= 0 || h.Height <= 0 {
-		return "agywarp\n" + h.processList.Render() + "\n" + h.trafficChart.Render() + "\n" + h.console.Render() + "\n" + h.footer.Render()
+		return "agywarp\n" + h.processList.Render() + "\n" + h.trafficChart.Render() + "\n" + h.console.Render() + "\n" + footer.Render()
 	}
 
 	if h.outputExpanded {
@@ -1084,7 +1067,6 @@ func (h *Home) Render() string {
 			height = 1
 		}
 		h.console.SetSize(h.Width, height)
-		footer := h.footer
 		footer.Hints = []components.FooterHint{components.Hint("o: dashboard"), components.Hint("PgUp/PgDn: scroll"), components.Hint("End: latest")}
 		return lipgloss.JoinVertical(lipgloss.Left, h.console.Render(), footer.Render())
 	}
@@ -1114,11 +1096,16 @@ func (h *Home) Render() string {
 	}
 
 	// Keep the outer-route section visible when the terminal has enough space.
-	if available >= 23 && cardsHeight < 13 {
-		cardsHeight = 13
+	if available >= 22 && cardsHeight < 12 {
+		cardsHeight = 12
 		trafficHeight = (available - cardsHeight) / 3
 		consoleHeight = available - cardsHeight - trafficHeight
 	}
+
+	// Give traffic four more rows while keeping at least four rows for output.
+	extraTrafficRows := min(4, max(0, consoleHeight-4))
+	trafficHeight += extraTrafficRows
+	consoleHeight -= extraTrafficRows
 
 	h.trafficChart.Width = h.Width
 	h.trafficChart.Height = trafficHeight
@@ -1177,7 +1164,7 @@ func (h *Home) Render() string {
 		Width(h.Width).
 		Height(h.footer.Height).
 		MaxHeight(h.footer.Height).
-		Render(h.footer.Render())
+		Render(footer.Render())
 
 	screen := lipgloss.JoinVertical(
 		lipgloss.Left,

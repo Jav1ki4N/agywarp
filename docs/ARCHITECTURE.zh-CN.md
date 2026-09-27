@@ -70,8 +70,9 @@ WARP 路由规则，则拒绝自动恢复。它会清除 `profiles.yaml` 引用�
 
 ### Network Card
 
-Network Card 显示节点、Mihomo proxy provider 和当前机场。proxy provider 是
-Mihomo 中具名的代理集合，与机场订阅名称不同；静态节点可能没有 provider。
+Network Card 显示节点和合并后的 Source 行：优先显示当前机场名称；若 Mihomo
+proxy provider 有值且名称不同，则附在括号内。没有机场名称时使用 provider
+名称。静态节点可能没有 provider。
 
 ## 切换机场与节点
 

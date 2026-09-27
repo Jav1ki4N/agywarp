@@ -39,15 +39,20 @@ func ElevateColor(c color.Color, delta int) color.Color {
 	// Perceived luminance formula (ITU-R BT.601)
 	lum := 0.299*float64(r) + 0.587*float64(g) + 0.114*float64(b)
 
-	var newR, newG, newB int
-	if lum < 128 { // Dark background: raise brightness
-		newR = min(r+delta, 255)
-		newG = min(g+delta, 255)
-		newB = min(b+delta, 255)
-	} else { // Light background: lower brightness
-		newR = max(r-delta, 0)
-		newG = max(g-delta, 0)
-		newB = max(b-delta, 0)
+	// Scale all channels together to retain both hue and saturation.
+	// Bound the scale before applying it so no individual channel clips.
+	scale := 0.0
+	if lum > 0 {
+		targetLum := max(0, min(255, lum+float64(delta)))
+		if lum >= 128 {
+			targetLum = max(0, lum-float64(delta))
+		}
+		scale = min(targetLum/lum, 255/float64(max(r, g, b)))
+	}
+	newR, newG, newB := int(float64(r)*scale), int(float64(g)*scale), int(float64(b)*scale)
+	if lum == 0 { // A black background has no hue to preserve.
+		newR = max(0, min(255, delta))
+		newG, newB = newR, newR
 	}
 
 	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", newR, newG, newB))

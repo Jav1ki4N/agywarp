@@ -134,7 +134,7 @@ func (n *NetworkCard) Render() string {
 		titleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(styles.ColorPrimary)
-		delimStyle = lipgloss.NewStyle().Foreground(styles.ColorDimGray)
+		delimStyle = lipgloss.NewStyle().Foreground(delimFg)
 	} else {
 		titleStyle = lipgloss.NewStyle().
 			Bold(false).
@@ -227,9 +227,25 @@ func (n *NetworkCard) Render() string {
 	} else if n.OuterStatus == "MISMATCH" {
 		pathColor = styles.ColorDanger
 	}
-	modeVal := n.ProxyMode + " [p switch]"
+	modeVal := n.ProxyMode
 	if n.ProxyModeLocked {
 		modeVal = n.ProxyMode + " [locked]"
+	}
+	source := strings.TrimSpace(n.OuterAirport)
+	provider := strings.TrimSpace(n.OuterProvider)
+	if source == "---" {
+		source = ""
+	}
+	if provider == "---" {
+		provider = ""
+	}
+	if source == "" {
+		source = provider
+	} else if provider != "" && provider != source {
+		source += " (" + provider + ")"
+	}
+	if source == "" {
+		source = "---"
 	}
 	lines := []string{
 		renderRow("Service", serviceVal, serviceDefault, serviceColor),
@@ -239,10 +255,9 @@ func (n *NetworkCard) Render() string {
 		renderRow("Exit IP", exitIPVal, exitIPDefault, textFg),
 		renderRow("Latency", latencyVal, latencyDefault, styles.ColorWarning),
 		renderRow("Mihomo Rule", mihomoVal, mihomoDefault, styles.ColorSuccess),
-		delimStyle.Render("  ── WARP outer route"),
+		lipgloss.NewStyle().Foreground(titleFg).Render("  ── WARP outer route"),
 		renderRow("Node", n.OuterNode, n.OuterNode == "---", textFg),
-		renderRow("Provider", n.OuterProvider, n.OuterProvider == "---", textFg),
-		renderRow("Airport", n.OuterAirport, n.OuterAirport == "---", textFg),
+		renderRow("Source", source, source == "---", textFg),
 		renderRow("Path", n.OuterStatus, false, pathColor),
 	}
 

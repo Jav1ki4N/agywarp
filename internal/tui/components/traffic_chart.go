@@ -18,7 +18,8 @@ var blockRunes = []rune{' ', ' ', '▂', '▃', '▄', '▅', '▆', '▇', '█
 // TrafficChart displays real-time network traffic columns with a background-aware vertical gradient.
 type TrafficChart struct {
 	ComponentBase
-	Title string
+	Title        string
+	TunnelActive bool
 
 	// Metrics
 	InterfaceName string
@@ -139,7 +140,7 @@ func FormatSpeed(bytesPerSec float64) string {
 // - On a dark background, base is elevated (+35~+45) and cool-tinted so it is visibly brighter than the background.
 // - On a light background, base is lowered (-40) so it is visibly darker than the background.
 // - As rows move upwards towards row 0, luminance increases smoothly to peak highlight.
-func generateVerticalGradient(steps int, bg color.Color) []color.Color {
+func generateVerticalGradient(steps int, bg color.Color, warm ...bool) []color.Color {
 	if steps <= 0 {
 		return nil
 	}
@@ -183,6 +184,18 @@ func generateVerticalGradient(steps int, bg color.Color) []color.Color {
 		}
 		mid = rgb{r: 79, g: 70, b: 229}
 		peak = rgb{r: 14, g: 116, b: 144}
+	}
+
+	if len(warm) > 0 && warm[0] {
+		if isDark {
+			base = rgb{r: float64(min(bgR+80, 255)), g: float64(min(bgG+35, 255)), b: float64(min(bgB+8, 255))}
+			mid = rgb{r: 246, g: 130, b: 31}  // Cloudflare-inspired orange #f6821f
+			peak = rgb{r: 255, g: 216, b: 92} // Warm yellow #ffd85c
+		} else {
+			base = rgb{r: float64(max(bgR-35, 0)), g: float64(max(bgG-65, 0)), b: float64(max(bgB-110, 0))}
+			mid = rgb{r: 194, g: 85, b: 16}
+			peak = rgb{r: 145, g: 95, b: 0} // Dark gold for contrast on light backgrounds
+		}
 	}
 
 	if steps == 1 {
@@ -233,7 +246,7 @@ func (t *TrafficChart) Render() string {
 	var titleStyle, delimStyle lipgloss.Style
 	if t.Focused {
 		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(styles.ColorPrimary)
-		delimStyle = lipgloss.NewStyle().Foreground(styles.ColorDimGray)
+		delimStyle = lipgloss.NewStyle().Foreground(delimFg)
 	} else {
 		titleStyle = lipgloss.NewStyle().Bold(false).Foreground(titleFg)
 		delimStyle = lipgloss.NewStyle().Foreground(delimFg)
@@ -255,6 +268,12 @@ func (t *TrafficChart) Render() string {
 	downStyle := lipgloss.NewStyle().Foreground(styles.ColorSuccess) // Green for download
 	upStyle := lipgloss.NewStyle().Foreground(styles.ColorWarning)   // Amber for upload
 	peakStyle := lipgloss.NewStyle().Foreground(dimValFg)
+	if t.TunnelActive {
+		accents := generateVerticalGradient(3, t.BgColor, true)
+		downStyle = downStyle.Foreground(accents[1])
+		upStyle = upStyle.Foreground(accents[0])
+		peakStyle = peakStyle.Foreground(accents[0])
+	}
 
 	readouts := fmt.Sprintf(" %s  %s  %s ──", downStyle.Render(downStr), upStyle.Render(upStr), peakStyle.Render(peakStr))
 	prefixWidth := lipgloss.Width(titlePrefix)
@@ -337,7 +356,7 @@ func (t *TrafficChart) Render() string {
 
 	// 5. Render Chart Plot with Vertical Gradient
 	// row 0 is top (brightest), row plotHeight-1 is bottom (base)
-	gradient := generateVerticalGradient(plotHeight, t.BgColor)
+	gradient := generateVerticalGradient(plotHeight, t.BgColor, t.TunnelActive)
 	faintFloorColor := styles.ElevateColor(t.BgColor, 15)
 
 	var plotLines []string

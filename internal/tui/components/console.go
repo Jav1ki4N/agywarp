@@ -54,8 +54,6 @@ func NewConsole() Console {
 		TimeFg:        styles.ColorDimGray,
 		TextFg:        styles.ColorLightGray,
 	}
-	c.AddLog("INFO", "agywarp TUI initialized")
-	c.AddLog("INFO", "ready for proxy orchestration")
 	return c
 }
 
@@ -186,10 +184,10 @@ func (c *Console) Render() string {
 	delimStyle := lipgloss.NewStyle().Foreground(delimFg)
 	titleStyle := lipgloss.NewStyle().Foreground(titleFg).Bold(false)
 
-	titlePart := "── " + c.Title + " "
-	if c.Width >= 55 {
-		titlePart += "(PgUp PgDn · End latest · o expand) "
+	if c.Focused {
+		titleStyle = titleStyle.Foreground(styles.ColorPrimary).Bold(true)
 	}
+	titlePart := "── " + c.Title + " "
 	titleWidth := lipgloss.Width(titlePart)
 
 	var delimLine string

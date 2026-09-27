@@ -56,12 +56,14 @@ func (h *Home) switchProxyMode() {
 		return
 	}
 	h.applyProxyMode(mode)
-	if mode == proxymode.HTTP {
-		h.console.AddLog("WARN", "HTTP CONNECT supports TCP targets; this local proxy does not carry process UDP traffic")
-	}
 	h.networkCard.ExitIP = "---"
 	h.networkCard.ExitCountry = "---"
 	h.networkCard.Colo = "---"
 	h.networkCard.Latency = "---"
-	h.console.AddLog("INFO", "Local WARP proxy mode: "+mode.Label()+"; press t to test this mode (no automatic fallback)")
+	level, message := "INFO", "Proxy mode · "+mode.Label()
+	if mode == proxymode.HTTP {
+		level = "WARN"
+		message += " · TCP targets only"
+	}
+	h.console.AddLog(level, message)
 }

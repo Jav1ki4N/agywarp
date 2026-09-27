@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type FooterHint struct {
@@ -45,7 +46,6 @@ func NewFooter() Footer {
 		Status:        "STATUS",
 		State:         "DOWN",
 		StateBg:       styles.ColorDanger,
-		BarBg:         styles.ColorBarBg,
 		HintFg:        styles.ColorHintFg,
 	}
 }
@@ -60,7 +60,8 @@ func (f *Footer) Update(msg tea.Msg) tea.Cmd {
 		f.Width = msg.Width
 		f.Height = 1
 	case tea.BackgroundColorMsg: // get terminal background color
-		f.BarBg = styles.ElevateColor(msg, 22)
+		r, g, b, _ := msg.RGBA()
+		f.BarBg = color.RGBA{R: uint8(float64(r>>8) * 0.85), G: uint8(float64(g>>8) * 0.85), B: uint8(float64(b>>8) * 0.85), A: 255}
 		f.HintFg = styles.ElevateColor(msg, 95)
 	}
 	return nil
@@ -69,6 +70,17 @@ func (f *Footer) Update(msg tea.Msg) tea.Cmd {
 func (f *Footer) Render() string {
 	if f.Width <= 0 { // nothing can be shown
 		return ""
+	}
+
+	// Until the terminal reports its background, leave the bar transparent.
+	barBg := f.BarBg
+	hintFg := f.HintFg
+	if hintFg == nil {
+		hintFg = styles.ColorHintFg
+	}
+	barStyle := lipgloss.NewStyle()
+	if barBg != nil {
+		barStyle = barStyle.Background(barBg)
 	}
 
 	// version block
@@ -80,10 +92,9 @@ func (f *Footer) Render() string {
 	versionBlock := versionStyle.Render(f.Version)
 
 	// status(literal) & state
-	statusLabelStyle := lipgloss.NewStyle().
+	statusLabelStyle := barStyle.
 		Bold(true).
-		Foreground(styles.ColorWhite).
-		Background(styles.ColorStatusDarkBg).
+		Foreground(hintFg).
 		Padding(0, 1)
 	statusLabelBlock := statusLabelStyle.Render(f.Status)
 
@@ -113,14 +124,6 @@ func (f *Footer) Render() string {
 		middleWidth = 0
 	}
 
-	// 使用动态计算出的微亮背景色（若未取到则回退到预设值）
-	barBg := f.BarBg
-	hintFg := f.HintFg
-	if barBg == nil || hintFg == nil {
-		barBg = styles.ColorBarBg
-		hintFg = styles.ColorHintFg
-	}
-
 	var middleSection string
 	if middleWidth > 0 {
 		var renderedHints []string
@@ -131,29 +134,19 @@ func (f *Footer) Render() string {
 				fg = h.Color
 				bold = true
 			}
-			renderedHints = append(renderedHints, lipgloss.NewStyle().
-				Foreground(fg).
-				Bold(bold).
-				Render(h.Text))
+			renderedHints = append(renderedHints, lipgloss.NewStyle().Foreground(fg).Bold(bold).Render(strings.ReplaceAll(strings.ReplaceAll(h.Text, "\n", " "), "\r", "")))
 		}
-		hintsStr := strings.Join(renderedHints, "    ")
-		hintContainer := lipgloss.NewStyle().
-			Background(barBg).
-			Padding(0, 1)
-
-		hintsRendered := hintContainer.Render(hintsStr)
-		hintsWidth := lipgloss.Width(hintsRendered)
-
-		if hintsWidth <= middleWidth {
-			fillerWidth := middleWidth - hintsWidth
-			filler := lipgloss.NewStyle().Background(barBg).Render(strings.Repeat(" ", fillerWidth))
-			middleSection = lipgloss.JoinHorizontal(lipgloss.Top, hintsRendered, filler)
+		separator := "    "
+		hintsStr := strings.Join(renderedHints, separator)
+		if middleWidth > 2 {
+			hintsStr = ansi.Truncate(hintsStr, middleWidth-2, "…")
+			padding := middleWidth - lipgloss.Width(hintsStr)
+			middleSection = strings.Repeat(" ", padding/2) + hintsStr + strings.Repeat(" ", padding-padding/2)
 		} else {
-			// 空间不足以完整显示提示时，退化为纯背景底条
-			middleSection = lipgloss.NewStyle().Background(barBg).Render(strings.Repeat(" ", middleWidth))
+			middleSection = strings.Repeat(" ", middleWidth)
 		}
 	}
 
-	// 单行状态栏：Version | Hints (自适应动态微亮区) | Status + State
-	return lipgloss.JoinHorizontal(lipgloss.Top, versionBlock, middleSection, statusStateGroup)
+	// 单行状态栏：Version | Hints (仅前景色) | Status + State
+	return ansi.Truncate(versionBlock+middleSection+statusStateGroup, f.Width, "")
 }
