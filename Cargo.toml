@@ -1,0 +1,39 @@
+[package]
+name = "agywarp"
+version = "0.1.0"
+edition = "2021"
+authors = ["Jav1ki4N <i4Nomercyshown@outlook.com>"]
+description = "Route Antigravity and selected processes through Cloudflare WARP and Mihomo (Clash Verge Rev) on Windows & Linux"
+license = "MIT"
+
+[dependencies]
+# Async Runtime
+tokio = { version = "1.43", features = ["full"] }
+futures-util = "0.3"
+
+# CLI & Configuration
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+dirs = "6.0"
+
+# Networking & HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json", "socks", "rustls-tls", "stream"] }
+
+# System, Processes & Diagnostics
+sysinfo = "0.33"
+sha2 = "0.10"
+hex = "0.4"
+which = "7.0"
+chrono = "0.4"
+
+# Error handling & Logging
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }

@@ -1,6 +1,8 @@
 # Binaries
 agywarp
 bin/
+target/
+*.exe
 
 # OS and IDE files
 .DS_Store
